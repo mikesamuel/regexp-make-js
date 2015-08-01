@@ -56,7 +56,9 @@
     el('td', tr, JSON.stringify(parts));
     el('td', tr, stringify(values));
     el('td', tr, expected);
-    var args = [parts];
+    var partsObj = parts.slice();
+    partsObj.raw = parts.slice();
+    var args = [partsObj];
     for (var j = 0; j < values.length; ++j) { args.push(values[j]); }
     var got = RegExp.make.apply(RegExp, args).toString();
     el('td', tr, got);

@@ -12,13 +12,17 @@ RegExp.make = (function () {
             /^(?:(\])|(?:[^\]\\]|\\.)+)/,
             /^(?:([\}])|[^\}]+)/,
     ];
-    
+
+    var CONTEXTS_CACHE = new WeakMap();
+
     function computeContexts(regexParts) {
         var contexts = [];
         var flags = '';
 
+	var raw = regexParts.raw;
+
         var i = 0;
-        var n = regexParts.length;
+        var n = raw.length;
         var context = BLOCK;
         // We step over parts and consume tokens until we reach an
         // interpolation point.
@@ -26,18 +30,18 @@ RegExp.make = (function () {
         // Use the (non-JS) convention that
         // (?i)
         // at the start specifies the flag i
-        var m = /^\(\?([gim]*)\)/.exec(regexParts[0]);
+        var m = /^\(\?([gim]*)\)/.exec(raw[0]);
         if (m) {
             flags = m[1];
-            regexParts[0] = regexParts[0].substring(m[0].length);
+            raw[0] = raw[0].substring(m[0].length);
         }
-        
-        var currentPart = regexParts[0];
+
+        var currentPart = raw[0];
         while (i < n || currentPart) {
             if (!currentPart) {
                 // We've reached an interpolation point.
                 ++i;
-                currentPart = regexParts[i];
+                currentPart = raw[i];
                 contexts.push(context);
                 continue;
             }
@@ -67,8 +71,10 @@ RegExp.make = (function () {
 	// since no value is interpolated there.
 	contexts.length--;
 
-        regexParts.contexts = contexts;
-        regexParts.flags = flags;
+	CONTEXTS_CACHE[regexParts] = {
+            contexts: contexts,
+            flags: flags
+	};
     }
 
     var UNSAFE_CHARS_BLOCK = /[\\(){}\[\]\|\?\*\+\^\$\/]/g;
@@ -85,21 +91,23 @@ RegExp.make = (function () {
         }
 	return '';
     }
-    
+
     return function (regexParts, valuesVarArgs) {
 	values = [];
 	values.push.apply(values, arguments);
 	values.shift();
 
-        var contexts = regexParts.contexts;
-        if (!contexts) {
-            computeContexts(regexParts)
-            contexts = regexParts.contexts
+        var computed = CONTEXTS_CACHE[regexParts];
+        if (!computed) {
+            computeContexts(regexParts);
+            computed = CONTEXTS_CACHE[regexParts];
         }
-        var flags = regexParts.flags;
+	var contexts = computed.contexts;
+        var flags = computed.flags;
+	var raw = regexParts.raw;
 
         var n = contexts.length;
-        var pattern = regexParts[0];
+        var pattern = raw[0];
         for (var i = 0; i < n; ++i) {
             var context = contexts[i];
             var value = values[i];
@@ -126,7 +134,7 @@ RegExp.make = (function () {
                 break;
             }
             pattern += subst;
-            pattern += regexParts[i+1];
+            pattern += raw[i+1];
         }
         return new RegExp(pattern, flags);
     }
