@@ -1,145 +1,153 @@
+// Using the subset of ES6 currently supported by FF Nightly 42.0a1 (2015-08-01)
+// For full ES6:
+// * replace "var" below with "let"
+
+"use strict";
+
 RegExp.make = (function () {
-    var BLOCK = 0;
-    var BACKSLASH = 1;
-    var CHARSET = 2;
-    var COUNT = 3;
+  const BLOCK = 0;
+  const BACKSLASH = 1;
+  const CHARSET = 2;
+  const COUNT = 3;
 
-    // For each context, group 1 matches any token that exits the
-    // context.
-    var CONTEXT_TOKENS = [
-            /^(?:([\\\{\[])|(?:[^\\\{\[]|\\.)+)/,
-            /^(?:[\s\S])/,
-            /^(?:(\])|(?:[^\]\\]|\\.)+)/,
-            /^(?:([\}])|[^\}]+)/,
-    ];
+  // For each context, group 1 matches any token that exits the
+  // context.
+  const CONTEXT_TOKENS = [
+      /^(?:([\\\{\[])|(?:[^\\\{\[]|\\.)+)/,
+      /^(?:[\s\S])/,
+      /^(?:(\])|(?:[^\]\\]|\\.)+)/,
+      /^(?:([\}])|[^\}]+)/,
+  ];
 
-    var CONTEXTS_CACHE = new WeakMap();
+  const CONTEXTS_CACHE = new WeakMap();
 
-    function computeContexts(regexParts) {
-        var contexts = [];
-        var flags = '';
+  function computeContexts(template) {
+    const contexts = [];
 
-	var raw = regexParts.raw;
+    const raw = template.raw;
 
-        var i = 0;
-        var n = raw.length;
-        var context = BLOCK;
-        // We step over parts and consume tokens until we reach an
-        // interpolation point.
+    var i = 0;
+    const n = raw.length;
+    var context = BLOCK;
+    // We step over parts and consume tokens until we reach an
+    // interpolation point.
 
-        // Use the (non-JS) convention that
-        // (?i)
-        // at the start specifies the flag i
-        var m = /^\(\?([gim]*)\)/.exec(raw[0]);
-        if (m) {
-            flags = m[1];
-            raw[0] = raw[0].substring(m[0].length);
+    var currentPart = raw[0];
+    while (i < n || currentPart) {
+      if (!currentPart) {
+        // We've reached an interpolation point.
+        ++i;
+        currentPart = raw[i];
+        contexts.push(context);
+        continue;
+      }
+      var m = CONTEXT_TOKENS[context].exec(currentPart);
+      currentPart = currentPart.substring(m[0].length);
+      if (!m[0].length) { throw new Error(currentPart); }
+      if (m[1]) {
+        switch (context) {
+        case BLOCK:
+          switch (m[1]) {
+          case '\\': context = BACKSLASH; break;
+          case '[':  context = CHARSET;   break;
+          case '{':  context = COUNT;     break;
+          default: throw new Error(m[1]);
+          }
+          break;
+        case BACKSLASH:
+        case CHARSET:
+        case COUNT:
+          context = BLOCK;
+          break;
         }
-
-        var currentPart = raw[0];
-        while (i < n || currentPart) {
-            if (!currentPart) {
-                // We've reached an interpolation point.
-                ++i;
-                currentPart = raw[i];
-                contexts.push(context);
-                continue;
-            }
-            m = CONTEXT_TOKENS[context].exec(currentPart);
-            currentPart = currentPart.substring(m[0].length);
-            if (!m[0].length) { throw new Error(currentPart); }
-            if (m[1]) {
-                switch (context) {
-                case BLOCK:
-                    switch (m[1]) {
-                    case '\\': context = BACKSLASH; break;
-                    case '[':  context = CHARSET;   break;
-                    case '{':  context = COUNT;     break;
-                    default: throw new Error(m[1]);
-                    }
-                    break;
-                case BACKSLASH:
-                case CHARSET:
-                case COUNT:
-                    context = BLOCK;
-                    break;
-                }
-            }
-        }
-
-	// We don't need the context after the last part
-	// since no value is interpolated there.
-	contexts.length--;
-
-	CONTEXTS_CACHE[regexParts] = {
-            contexts: contexts,
-            flags: flags
-	};
+      }
     }
 
-    var UNSAFE_CHARS_BLOCK = /[\\(){}\[\]\|\?\*\+\^\$\/]/g;
-    var UNSAFE_CHARS_CHARSET = /[\]\-\\]/g;
+    // We don't need the context after the last part
+    // since no value is interpolated there.
+    contexts.length--;
 
-    function destructureChars(source) {
-        var n = source.length;
-        if (source.charAt(0) === '['
-            && source.charAt(n - 1) === ']') {
-            // Guard \ at the end and unescaped ].
-            var chars = source.substring(1, n - 1).replace(
-                /((?:^|[^\\])(?:\\\\)*)(?:\\$|\])/g, '\\$&');
-            return chars;
-        }
-	return '';
+    CONTEXTS_CACHE[template] = {
+      contexts: contexts
+    };
+  }
+
+  const UNSAFE_CHARS_BLOCK = /[\\(){}\[\]\|\?\*\+\^\$\/]/g;
+  const UNSAFE_CHARS_CHARSET = /[\]\-\\]/g;
+
+  function destructureChars(source) {
+    const n = source.length;
+    if (source.charAt(0) === '['
+        && source.charAt(n - 1) === ']') {
+      // Guard \ at the end and unescaped ].
+      const chars = source.substring(1, n - 1).replace(
+          /((?:^|[^\\])(?:\\\\)*)(?:\\$|\])/g, '\\$&');
+      return chars;
+    }
+    return '';
+  }
+
+  return function make(template, values_var_args) {
+    if (arguments.length === 1 && typeof template === 'string') {
+      // Allow RegExp.make(i)`...` to specify flags.
+      // This calling convention is disjoint with use as a template tag
+      // since the typeof a template record is 'object'.
+      const flags = template;
+      return function (template, values_var_args) {
+        const re = make.apply(this, arguments);
+        return new RegExp(re.source, flags);
+      };
     }
 
-    return function (regexParts, valuesVarArgs) {
-	values = [];
-	values.push.apply(values, arguments);
-	values.shift();
+    const values = [];
+    values.push.apply(values, arguments);
+    values.shift();
 
-        var computed = CONTEXTS_CACHE[regexParts];
-        if (!computed) {
-            computeContexts(regexParts);
-            computed = CONTEXTS_CACHE[regexParts];
-        }
-	var contexts = computed.contexts;
-        var flags = computed.flags;
-	var raw = regexParts.raw;
-
-        var n = contexts.length;
-        var pattern = raw[0];
-        for (var i = 0; i < n; ++i) {
-            var context = contexts[i];
-            var value = values[i];
-            var subst;
-            switch (context) {
-            case BLOCK:
-                subst = '(?:'
-                    + (
-                        (value instanceof RegExp)
-                            ? String(value.source)
-                            : String(value).replace(UNSAFE_CHARS_BLOCK, '\\$&')
-                    )
-                    + ')';
-                break;
-            case BACKSLASH:
-            case COUNT:
-                subst = (+value || '0');
-                break;
-            case CHARSET:
-                subst =
-                    (value instanceof RegExp)
-                    ? destructureChars(String(value.source))
-                    : String(value).replace(UNSAFE_CHARS_CHARSET, '\\$&');
-                break;
-            }
-            pattern += subst;
-            pattern += raw[i+1];
-        }
-        return new RegExp(pattern, flags);
+    var computed = CONTEXTS_CACHE[template];
+    if (!computed) {
+      computeContexts(template);
+      computed = CONTEXTS_CACHE[template];
     }
+    const contexts = computed.contexts;
+    const raw = template.raw;
 
-    // TODO: When interpolating regular expressions, turn capturing groups into non-capturing groups.
-    // TODO: Rewrite a-z when interpolating charsets that have a different case-sensitivity.
+    const n = contexts.length;
+    var pattern = raw[0];
+    for (var i = 0; i < n; ++i) {
+      const context = contexts[i];
+      const value = values[i];
+      var subst;
+      switch (context) {
+      case BLOCK:
+        subst = '(?:'
+          + (
+            (value instanceof RegExp)
+              ? String(value.source)
+              : String(value).replace(UNSAFE_CHARS_BLOCK, '\\$&')
+          )
+          + ')';
+        break;
+      case BACKSLASH:
+      case COUNT:
+        subst = (+value || '0');
+        break;
+      case CHARSET:
+        subst =
+          (value instanceof RegExp)
+          ? destructureChars(String(value.source))
+          : String(value).replace(UNSAFE_CHARS_CHARSET, '\\$&');
+        break;
+      }
+      pattern += subst;
+      pattern += raw[i+1];
+    }
+    return new RegExp(pattern, '');
+  };
+
+  // TODO: When interpolating regular expressions, turn capturing
+  // groups into non-capturing groups.
+
+  // TODO: Rewrite a-z when interpolating charsets that have a
+  // different case-sensitivity.
 
 })();
