@@ -87,21 +87,17 @@ RegExp.make = (function () {
     return '';
   }
 
-  return function make(template, values_var_args) {
-    if (arguments.length === 1 && typeof template === 'string') {
+  return function make(template, ...values) {
+    if (values.length === 0 && typeof template === 'string') {
       // Allow RegExp.make(i)`...` to specify flags.
       // This calling convention is disjoint with use as a template tag
       // since the typeof a template record is 'object'.
       const flags = template;
-      return function (template, values_var_args) {
-        const re = make.apply(this, arguments);
+      return function (template, ...values) {
+        const re = make(template, ...values);
         return new RegExp(re.source, flags);
       };
     }
-
-    const values = [];
-    values.push.apply(values, arguments);
-    values.shift();
 
     var computed = CONTEXTS_CACHE[template];
     if (!computed) {
