@@ -6,19 +6,18 @@
 
 RegExp.make = (function () {
   const BLOCK = 0;
-  const BACKSLASH = 1;
-  const CHARSET = 2;
-  const COUNT = 3;
+  const CHARSET = 1;
+  const COUNT = 2;
 
   // For each context, group 1 matches any token that exits the
   // context.
   const CONTEXT_TOKENS = [
-      /^(?:([\\\{\[])|(?:[^\\\{\[]|\\.)+)/,
-      /^(?:[\s\S])/,
-      /^(?:(\])|(?:[^\]\\]|\\.)+)/,
+      /^(?:(\{|\[\^?)|(?:[^\\\{\[]|\\[\s\S])+)/,
+      /^(?:(\])|(?:[^\]\\]|\\[\s\S])+)/,
       /^(?:([\}])|[^\}]+)/,
   ];
 
+  // Maps template literals to information derived from them.
   const CONTEXTS_CACHE = new WeakMap();
 
   function computeContexts(template) {
@@ -48,15 +47,12 @@ RegExp.make = (function () {
         switch (context) {
         case BLOCK:
           switch (m[1]) {
-          case '\\': context = BACKSLASH; break;
-          case '[':  context = CHARSET;   break;
-          case '{':  context = COUNT;     break;
+          case '[': context = CHARSET; break;
+          case '{': context = COUNT;   break;
           default: throw new Error(m[1]);
           }
           break;
-        case BACKSLASH:
-        case CHARSET:
-        case COUNT:
+        default:
           context = BLOCK;
           break;
         }
@@ -119,12 +115,11 @@ RegExp.make = (function () {
         subst = '(?:'
           + (
             (value instanceof RegExp)
-              ? String(value.source)
+              ? fixUpInterpolatedRegExp(String(value.source))
               : String(value).replace(UNSAFE_CHARS_BLOCK, '\\$&')
           )
           + ')';
         break;
-      case BACKSLASH:
       case COUNT:
         subst = (+value || '0');
         break;
