@@ -1,2 +1,2 @@
 # regexp-make-js
-ES6 string template tag for creating dynamic regular expressions
+ES6 template string tag for dynamically creating regular expressions
