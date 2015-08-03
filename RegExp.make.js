@@ -75,13 +75,14 @@ RegExp.make = (function () {
   const UNSAFE_CHARS_BLOCK = /[\\(){}\[\]\|\?\*\+\^\$\/]/g;
   const UNSAFE_CHARS_CHARSET = /[\]\-\\]/g;
 
-  function destructureChars(source) {
+  function toCharRanges(source) {
     const n = source.length;
     if (source.charAt(0) === '['
         && source.charAt(n - 1) === ']') {
       // Guard \ at the end and unescaped ].
       const chars = source.substring(1, n - 1).replace(
           /((?:^|[^\\])(?:\\\\)*)(?:\\$|\])/g, '\\$&');
+      // TODO: if chars starts with ^, we should invert it
       return chars;
     }
     return '';
@@ -128,9 +129,11 @@ RegExp.make = (function () {
         subst = (+value || '0');
         break;
       case CHARSET:
+        // TODO: We need to keep track of whether we're interpolating
+        // into an inverted charset or not.
         subst =
           (value instanceof RegExp)
-          ? destructureChars(String(value.source))
+          ? toCharRanges(String(value.source))
           : String(value).replace(UNSAFE_CHARS_CHARSET, '\\$&');
         break;
       }
@@ -139,11 +142,4 @@ RegExp.make = (function () {
     }
     return new RegExp(pattern, '');
   };
-
-  // TODO: When interpolating regular expressions, turn capturing
-  // groups into non-capturing groups.
-
-  // TODO: Rewrite a-z when interpolating charsets that have a
-  // different case-sensitivity.
-
 })();
