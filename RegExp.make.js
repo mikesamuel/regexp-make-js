@@ -12,7 +12,7 @@ RegExp.make = (function () {
   // For each context, group 1 matches any token that exits the
   // context.
   const CONTEXT_TOKENS = [
-      /^(?:(\{|\[\^?)|(?:[^\\\{\[]|\\[\s\S])+)/,
+      /^(?:([\{\[])|(?:[^\\\{\[]|\\[\s\S])+)/,
       /^(?:(\])|(?:[^\]\\]|\\[\s\S])+)/,
       /^(?:([\}])|[^\}]+)/,
   ];
@@ -82,6 +82,14 @@ RegExp.make = (function () {
       return chars;
     }
     return '';
+  }
+
+  function fixUpInterpolatedRegExp(source) {
+    // TODO: Count capturing groups, and use that to identify and
+    // renumber back-references that are in scope.
+    // TODO: Rewrite back-references that are out of scope to refer
+    // to the template group.
+    return source;
   }
 
   return function make(template, ...values) {
