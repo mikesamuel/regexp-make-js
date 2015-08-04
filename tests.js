@@ -9,9 +9,11 @@
     return [template, values];
   }
 
+  /** Python style raw strings. */
   function r(template, ...values) {
     if (values.length !== 0) {
-      throw new Error();
+      throw new Error(
+	  'Interpolation not allowed into r`...` style raw strings');
     }
     return template.raw[0];
   }
