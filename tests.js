@@ -33,6 +33,7 @@
      r`/^([\\a-z]{42})(?:$)/i`],
     // Back-reference not scoped to containing RegExp
     [...qpair`^(#+)([^#\r\n]*)${ /\1/ }`, '',
+     // Can't use r`...` since \1 triggers an octal-escape strict parse error.
      '/^(#+)([^#\\r\\n]*)(?:\\1)/'],
     // Negated charset into a charset
     [...qpair`[${ /[^A-Z]/ }]`, '',
