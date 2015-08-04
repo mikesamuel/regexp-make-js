@@ -9,14 +9,54 @@
     return [template, values];
   }
 
+  /** Python style raw strings. */
+  function r(template, ...values) {
+    if (values.length !== 0) {
+      throw new Error(
+	  'Interpolation not allowed into r`...` style raw strings');
+    }
+    return template.raw[0];
+  }
+
   const tests = [
+    // No interpolations
+    [...qpair`^foo\(bar\);\n$`, '',
+     r`/^foo\(bar\);\n$/`],
+    // No interpolations but flags
+    [...qpair`^foo\(bar\);\n$`, 'gi',
+     r`/^foo\(bar\);\n$/gi`],
+    // A single string into a block context.
     [...qpair`^${ 'foo' }$`, '',
-     '/^(?:foo)$/'],
+     r`/^(?:foo)$/`],
+    // Testing transitions between contexts.
     [...qpair`^([${ '\\' }${ /[a-z]/ }]{${ 42 }})${ /$/ }`, 'i',
-     '/^([\\\\a-z]{42})(?:$)/i'],
-    // See above for why this says "\$${" rather than "\${"
+     r`/^([\\a-z]{42})(?:$)/i`],
+    // Back-reference not scoped to containing RegExp
     [...qpair`^(#+)([^#\r\n]*)${ /\1/ }`, '',
+     // Can't use r`...` since \1 triggers an octal-escape strict parse error.
      '/^(#+)([^#\\r\\n]*)(?:\\1)/'],
+    // Negated charset into a charset
+    [...qpair`[${ /[^A-Z]/ }]`, '',
+     r`/[\u0000-@\[-\uffff]/`],
+    // String into a charset
+    [...qpair`[${ "A-Z" }]`, '',
+     r`/[A\-Z]/`],
+    // String into a negated charset
+    [...qpair`[^${ "A-Z" }]`, '',
+     r`/[^A\-Z]/`],
+    // Multiple elements into a charset: individual chars, charsets,
+    // and special groups.
+    [...qpair`[${ /[a]|([c]|b)|d|_/ }]`, '',
+     r`/[_a-d]/`],
+    // Multiple case-insensitive elements into a charset: individual chars,
+    // charsets, and special groups.
+    [...qpair`[${ /[a]|(?:[c]|b)|d|_/i }]`, '',
+     r`/[A-D_a-d]/`],
+    [...qpair`[${ /x{1,2}/ }]`, '',
+     r`/[x]/`],
+
+    // TODO: \b means different things.
+    // TODO: interpolation of charset after - as in `[a-${...}]`
   ];
 
   function el(name, parent, opt_text) {
