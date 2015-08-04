@@ -54,8 +54,8 @@
      r`/[A-D_a-d]/`],
     [...qpair`[${ /x{1,2}/ }]`, '',
      r`/[x]/`],
-    // \b means different things.
 
+    // TODO: \b means different things.
     // TODO: interpolation of charset after - as in `[a-${...}]`
   ];
 
