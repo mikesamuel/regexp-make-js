@@ -5,25 +5,46 @@
 "use strict";
 
 RegExp.make = (function () {
+  /** A context in which any top-level RegExp operator can appear. */
   const BLOCK = 0;
+  /** A context inside a charset. */
   const CHARSET = 1;
+  /** A context inside a count -- inside the curlies in /x{1,2}/ */
   const COUNT = 2;
 
-  // For each context, group 1 matches any token that exits the
-  // context.
+  /**
+   * For each context, group 1 matches any token that exits the
+   * context.
+   */
   const CONTEXT_TOKENS = [
-      /^(?:([\{\[])|(?:[^\\\{\[]|\\[\s\S])+)/,
+      /^(?:([\{\[]|\(\??)|(?:[^\\\{\[\(]|\\[\s\S])+)/,
       /^(?:(\])|(?:[^\]\\]|\\[\s\S])+)/,
       /^(?:([\}])|[^\}]+)/,
   ];
 
-  // Maps template literals to information derived from them.
+  /** Maps template literals to information derived from them. */
   const CONTEXTS_CACHE = new WeakMap();
 
-  function computeContexts(template) {
-    const contexts = [];
+  /**
+   * Given the template literal parts, computes a record of
+   * the form
+   * {
+   *   contexts: [...],
+   *   templateGroupCounts: [...],
+   * }
+   *
+   * For each value, value[i], contexts[i] is the context in which
+   * it is interpolated.
+   *
+   * For each template literal, template.raw[i], templateGroupCounts[i]
+   * is the number of capturing groups entered in that part.
+   */
+  function getStaticInfo(raw) {
+    var staticInfo = CONTEXTS_CACHE.get(raw);
+    if (staticInfo) { return staticInfo; }
 
-    const raw = template.raw;
+    const contexts = [];
+    const templateGroupCounts = [];
 
     var i = 0;
     const n = raw.length;
@@ -32,23 +53,28 @@ RegExp.make = (function () {
     // interpolation point.
 
     var currentPart = raw[0];
+    var templateGroupCount = 0;
     while (i < n || currentPart) {
       if (!currentPart) {
         // We've reached an interpolation point.
         ++i;
         currentPart = raw[i];
         contexts.push(context);
+	templateGroupCounts.push(templateGroupCount);
+	templateGroupCount = 0;
         continue;
       }
-      var m = CONTEXT_TOKENS[context].exec(currentPart);
+      var m = currentPart.match(CONTEXT_TOKENS[context]);
       currentPart = currentPart.substring(m[0].length);
       if (!m[0].length) { throw new Error(currentPart); }
       if (m[1]) {
         switch (context) {
         case BLOCK:
           switch (m[1]) {
-          case '[': context = CHARSET; break;
-          case '{': context = COUNT;   break;
+          case '[':  context = CHARSET;    break;
+          case '{':  context = COUNT;      break;
+	  case '(':  templateGroupCount++; // Fall-through
+	  case '(?': context = BLOCK;      break;
           default: throw new Error(m[1]);
           }
           break;
@@ -62,10 +88,14 @@ RegExp.make = (function () {
     // We don't need the context after the last part
     // since no value is interpolated there.
     contexts.length--;
+    templateGroupCounts.push(templateGroupCount);
 
-    CONTEXTS_CACHE[template] = {
-      contexts: contexts
+    const computed = {
+      contexts: contexts,
+      templateGroupCounts: templateGroupCounts
     };
+    CONTEXTS_CACHE.set(raw, computed);
+    return computed;
   }
 
   /**
@@ -412,6 +442,15 @@ RegExp.make = (function () {
     ['B', new CharRanges()]
   ]);
 
+  /**
+   * Parses a RegExp charSet and adds its ranges to the given set.
+   *
+   * @param {string} charSet the text of a RegExp charset including any
+   *   square brackets.
+   * @param {CharRanges} ranges to add to.
+   *
+   * @return ranges to allow chaining.
+   */
   function addCharSetTo(charSet, ranges) {
     const isInverted = /^\[\^/.test(charSet);
     const rangesToAddTo = isInverted ? new CharRanges() : ranges;
@@ -484,12 +523,64 @@ RegExp.make = (function () {
     return ranges;
   }
 
-  function fixUpInterpolatedRegExp(source) {
-    // TODO: Count capturing groups, and use that to identify and
+  const PAREN_AND_BACKREF_RE = new RegExp(
+    '\\\\(?:[1-9]\\d*|\\D)'  // Back-reference or escape sequence
+    + '|\\[(?:[^\\\]\\\\]|\\\\[\s\S])*\\]'  // Don't look for parens in character groups
+    + '|\\(\\??',  // A group open.
+    'g'
+  );
+
+  function fixUpInterpolatedRegExp(source, regexGroupCount, templateGroups) {
+    // Count capturing groups, and use that to identify and
     // renumber back-references that are in scope.
-    // TODO: Rewrite back-references that are out of scope to refer
+    var sourceGroupCount = 0;
+    var hasBackRef = false;
+
+    const parts = source.match(PAREN_AND_BACKREF_RE);
+    const n = parts ? parts.length : 0;
+    for (var i = 0; i < n; ++i) {
+      const part = parts[i];
+      switch (part[0]) {
+      case '\\':
+        hasBackRef = hasBackRef || !isNaN(+part.substring(1));
+        break;
+      case '[':
+        break;
+      case '(':
+        if (part === '(') {  // Not the start of a non-capturing group
+          ++sourceGroupCount;
+        }
+      }
+    }
+
+    // Rewrite back-references that are out of scope to refer
     // to the template group.
-    return source;
+    var fixedSource = source;
+    if (sourceGroupCount && hasBackRef && regexGroupCount) {
+      fixedSource = source.replace(
+        PAREN_AND_BACKREF_RE,
+        function (part) {
+          if (part[0] == '\\') {
+            var backRefIndex = +part.substring(1);
+            if (backRefIndex === backRefIndex) {
+              if (backRefIndex <= sourceGroupCount) {
+                // A local reference.
+                return '\\' + (backRefIndex + regexGroupCount - 1);
+              } else if (backRefIndex < templateGroups.length) {
+                // A reference to a template group that is in scope.
+                return '\\' + templateGroups[backRefIndex];
+              } else {
+                // An out of scope back-reference matches the empty string.
+                return '(?:)';
+              }
+            }
+          }
+          return part;
+        }
+      );
+    }
+
+    return [fixedSource, sourceGroupCount];
   }
 
   function make(flags, template, ...values) {
@@ -500,29 +591,44 @@ RegExp.make = (function () {
       return make.bind(null, template /* use as flags instead */);
     }
 
-    var computed = CONTEXTS_CACHE[template];
-    if (!computed) {
-      computeContexts(template);
-      computed = CONTEXTS_CACHE[template];
-    }
-    const contexts = computed.contexts;
     const raw = template.raw;
+    const { contexts, templateGroupCounts } = getStaticInfo(raw);
 
     const n = contexts.length;
+
     var pattern = raw[0];
+    // For each group specified in the template, the index of the corresponding
+    // group in pattern.
+    const templateGroups = [
+      0 // Map implicit group 0, the whole match, to itself
+    ];
+    // The number of groups in the RegExp on pattern so far.
+    var regexGroupCount = 1;  // Count group 0.
+
+    function addTemplateGroups(i) {
+      const n = templateGroupCounts[i];
+      for (var j = 0; j < n; ++j) {
+        templateGroups.push(regexGroupCount++);
+      }
+    }
+    addTemplateGroups(0);
+
     for (var i = 0; i < n; ++i) {
       const context = contexts[i];
       const value = values[i];
       var subst;
       switch (context) {
       case BLOCK:
-        subst = '(?:'
-          + (
-            (value instanceof RegExp)
-              ? fixUpInterpolatedRegExp(String(value.source))
-              : String(value).replace(UNSAFE_CHARS_BLOCK, '\\$&')
-          )
-          + ')';
+        if (value instanceof RegExp) {
+          const [valueSource, valueGroupCount] = fixUpInterpolatedRegExp(
+            String(value.source), regexGroupCount, templateGroups);
+          subst = '(?:' + valueSource + ')';
+          regexGroupCount += valueGroupCount;
+        } else {
+          subst = '(?:'
+            + String(value).replace(UNSAFE_CHARS_BLOCK, '\\$&')
+            + ')';
+        }
         break;
       case COUNT:
         subst = (+value || '0');
@@ -538,9 +644,15 @@ RegExp.make = (function () {
       }
       pattern += subst;
       pattern += raw[i+1];
+      addTemplateGroups(i+1);
     }
-    return new RegExp(pattern, flags);
+    const output = new RegExp(pattern, flags);
+    output.templateGroups = templateGroups;
+    return output;
   }
 
   return make.bind(null, '' /* No flags by default */);
 })();
+
+// TODO: Figure out interpolation of charset after - as in `[a-${...}]`
+// TODO: Maybe rewrite back-references in the template.
