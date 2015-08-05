@@ -2,9 +2,12 @@
 <meta charset="UTF-8">
 <script src="RegExp.make.js"></script>
 <style>
-  .pass { background: #efe }
-  .fail { background: #fee }
   td { font-family: monospace; white-space: pre }
+  tr { vertical-align: top }
+  tr.fail > td.pass { background: #afa }
+  tr.fail > td.fail { font-weight: bolder; background: #faa }
+  tr.pass > td { background: #efe }
+  tr.fail > td { background: #fee }
 </style>
 <body>
 <script src="tests.js"></script>
