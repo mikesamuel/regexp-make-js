@@ -7,4 +7,20 @@
   td { font-family: monospace; white-space: pre }
 </style>
 <body>
-<script src="tests.js"></script>
+  <h1>RegExp.make Tests</h1>
+  <p id="warning" style="color: red; font-weight: bolder">
+    This library uses ES6 features.  It runs in modern Firefoxen.
+  </p>
+
+  <script>(function () {  // Test ES6 features
+    try {
+      eval('(function (...x) { const y = x; })');
+    } catch (_) {
+      console.warn('eval of ES6 features failed');
+      return;
+    }
+    document.getElementById('warning').style.display = 'none';
+  }());</script>
+
+  <script src="tests.js"></script>
+</html>
