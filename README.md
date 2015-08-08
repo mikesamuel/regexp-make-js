@@ -114,3 +114,8 @@ var match = "foo123".match();
 match[1] === 'foo';  // Because of /(foo)/
 match[re.templateGroups[1]] === '123';
 ```
+
+
+## TODO
+
+* [The `u` flag](https://mathiasbynens.be/notes/es6-unicode-regex) is not recognized and it should affect how we do case-folding and treat `.`, `\w` character classes, `\u{...}` escapes, etc.
