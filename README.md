@@ -1,5 +1,5 @@
 # regexp-make-js
-`RegExp.make` is ES6 string template tag for dynamically creating regular expressions.
+`RegExp.make` is an ES6 string template tag for dynamically creating regular expressions.
 
 ## Usage
 
@@ -7,15 +7,23 @@
 RegExp.make`^${foo},${bar}$`
 ```
 
-is a `RegExp` instance that matches the whole string (`^...$`) consisting of
-a substring matching the expression `foo` followed by the literal substring
-`","` followed by a substring matching the expression `bar`.
+is a `RegExp` instance that matches the whole string (`^...$`)
+consisting of a substring matching the value of the expression `foo`
+followed by the literal substring `","` followed by a substring
+matching the value of the expression `bar`.
 
 Interpolated expressions like `foo` and `bar` can be strings, or `RegExp`
 instances, or other values that are coerced to strings.
 
-`RegExp` instances are treated like the substrings they match -- their source
-is not used as a literal string.
+`RegExp` instances are treated like the set of substrings they match
+-- their source is not used as a literal string.
+
+```javascript
+RegExp.make`^${ /fo+/ }$`
+
+matches the entire string consisting of `'f'` followed by one or more
+`'o'`s; the Kleene + is not treated literally.
+
 
 ## Goals
 
@@ -57,12 +65,12 @@ const re = RegExp.make`^(${str})$`;
 ## Expressions
 
 | Context | Example | String | Numeric | RegExp |
----------------------------------------
+| ------- | ------- | ------ | ------- | ------ |
 | Block   | `/${...}/` | Treated literally | Treated Literally | With back-references adjusted |
 | Charset | `/[^${...}]/` | Individual chars | Individual Chars | All chars in any string matched by the RegExp |
 | Count   | `/x{1,${...}}/ | Inlined without wrapping | Inlined without wrapping | Inlined without wrapping |
 
-Interpolated values have are treated as atoms so
+Interpolated values are treated as atoms so
 
 ```javascript
 RegExp.make`${foo}*`
