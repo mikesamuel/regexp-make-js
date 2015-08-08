@@ -68,7 +68,7 @@ const re = RegExp.make`^(${str})$`;
 | ------- | ------- | ------ | ------- | ------ |
 | Block   | `/${...}/` | Treated literally | Treated Literally | With back-references adjusted |
 | Charset | `/[^${...}]/` | Individual chars | Individual Chars | All chars in any string matched by the RegExp |
-| Count   | `/x{1,${...}}/ | Inlined without wrapping | Inlined without wrapping | Inlined without wrapping |
+| Count   | `/x{1,${...}}/` | Inlined without wrapping | Inlined without wrapping | Inlined without wrapping |
 
 Interpolated values are treated as atoms so
 
