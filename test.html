@@ -1,6 +1,5 @@
 <!doctype html>
 <meta charset="UTF-8">
-<script src="RegExp.make.js"></script>
 <style>
   td { font-family: monospace; white-space: pre }
   tr { vertical-align: top }
@@ -17,13 +16,13 @@
 
   <script>(function () {  // Test ES6 features
     try {
-      eval('(function (...x) { const y = x; })');
+      eval('(function (...x) { const [y] = [...x]; })');
     } catch (_) {
-      console.warn('eval of ES6 features failed');
+      console.warn('eval of some ES6 features failed');
       return;
     }
-    document.getElementById('warning').style.display = 'none';
   }());</script>
 
+  <script src="RegExp.make.js"></script>
   <script src="tests.js"></script>
 </html>
