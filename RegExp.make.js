@@ -2,9 +2,9 @@
 // For full ES6:
 // * replace "var" below with "let"
 
-"use strict";
-
 RegExp.make = (function () {
+  "use strict";
+
   /** A context in which any top-level RegExp operator can appear. */
   const BLOCK = 0;
   /** A context inside a charset. */

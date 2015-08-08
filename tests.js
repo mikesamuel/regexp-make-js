@@ -5,6 +5,10 @@
 (function () {
   "use strict";
 
+  if (typeof RegExp.make !== 'function') {
+    return;
+  }
+
   function qpair(template, ...values) {
     return [template, values];
   }
@@ -157,4 +161,6 @@
     markPassFail(passAll, tr);
     markPassFail(passAll, trActual);
   }
+
+  document.getElementById('warning').style.display = 'none';
 }());
