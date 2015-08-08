@@ -142,7 +142,7 @@ RegExp.make = (function () {
           blockSource = '';
         }
         if (range) {
-          parseCharsetRanges(ranges, range);
+          parseCharsetRanges(range, ranges);
         } else if (!endCharset) {
           other(match ? match[0] : blockSource);
         }
