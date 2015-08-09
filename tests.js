@@ -35,6 +35,22 @@
     // Testing transitions between contexts.
     [...qpair`^([${ '\\' }${ /[a-z]/ }]{${ 42 }})${ /$/ }`, 'i',
      r`/^([\\a-z]{42})(?:$)/i`, [0, 1]],
+
+    // We allow numbers in counts and don't wrap with (?:...) since those
+    // are unnecessary.
+    // Simply coercing to string will allow [1,2] as a count value here to
+    // have the intuitive meaning.
+    // We want to treat empty strings differently here since
+    [...qpair`x{3,${''}}`, '',
+     // can be reasonably
+     r`/x{3,}/`],
+    // while if we allowed the empty string to be interpolated as the
+    // empty string, then we would screw up the way postfix operators
+    // associate as in
+    [...qpair`x${''}*`, '',
+     // where it would be unintuitive for the * to associate with x.
+     r`/x(?:)*/`],
+
     // Back-reference not scoped to containing RegExp
     [...qpair`^(#+)([^#\r\n]*)${ /\1/ }`, '',
      // Can't use r`...` since \1 triggers an octal-escape strict parse error.
@@ -61,7 +77,7 @@
      r`/[x]/`],
     // Rewrite group indices.
     [
-      //...qpair`(fo(o))${ /(x)\1(?:\2)/ }bar${ /\1/ }(baz)`,  // Octal escapes error
+    //...qpair`(fo(o))${ /(x)\1(?:\2)/ }bar${ /\1/ }(baz)`,  // Octal esc error
       { raw: ['(fo(o))', 'bar', '(baz)'] },
       [/(x)\1(?:\2)/, /\1/],
       '',
@@ -74,8 +90,8 @@
       //...qpair`^(${ /(.*)/ }\n(#+)\n${ /(.*)/ }\n\2)\n`,
       { raw: ['^(',         '\\n(#+)\\n',         '\\n\\2)\\n'] },
       [             /(.*)/,               /(.*)/],
-      //      0 1               2                                 <- Template groups
-      //      0 1   2           3          4                      <- Output groups
+      //      0 1               2                             <- Template groups
+      //      0 1   2           3          4                  <- Output groups
       '',
       '/^((?:(.*))\\n(#+)\\n(?:(.*))\\n\\3)\\n/',
       [0, 1, 3]
@@ -86,7 +102,22 @@
      '/((?:)?:x)/', [0, 1]],
     [...qpair`(${new RegExp('')}?:x)`, '',
      '/((?:(?:))?:x)/', [0, 1]],
-    // TODO: Write test to check that \b means different things.
+
+    // Test that interpolation of case-insensitive into case-sensitive
+    // expands letters.
+    [...qpair`${ /<foo>/i }[a-z0-9_]*${ /<\/foo>/ }`, '',
+     r`/(?:<[Ff][Oo][Oo]>)[a-z0-9_]*(?:<\/foo>)/`],
+
+    // Test that \b means different things in different contexts.
+    [...qpair`[${ /[\b\t\n]/ }],[${ /\b|\t|\n/ }]`, '',
+     r`/[\u0008-\u000a],[\u0009\u000a]/`],
+
+    // Treat null and undefined like the empty string
+    [...qpair`${null},${undefined},${NaN},${false},${0}`, '',
+     r`/(?:),(?:),(?:NaN),(?:false),(?:0)/`],
+
+    // TODO: Handle case-folding properly when u flag is present
+    // TODO: Handle interpolation in middle of charset start.  `[${...}^
   ];
 
   function el(name, parent, opt_text) {

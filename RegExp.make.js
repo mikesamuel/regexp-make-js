@@ -5,25 +5,240 @@
 RegExp.make = (function () {
   "use strict";
 
-  /** A context in which any top-level RegExp operator can appear. */
-  const BLOCK = 0;
-  /** A context inside a charset. */
-  const CHARSET = 1;
-  /** A context inside a count -- inside the curlies in /x{1,2}/ */
-  const COUNT = 2;
+  /** @enum{int} */
+  const Context = {
+    /** A context in which any top-level RegExp operator can appear. */
+    BLOCK: 0,
+    /** A context inside a charset.  {@code /[HERE]/} */
+    CHARSET: 1,
+    /** A context inside a charset.  <code>/x{HERE}/</code> */
+    COUNT: 2
+  };
+
+  const TOKENIZERS = new Map();
 
   /**
-   * For each context, group 1 matches any token that exits the
-   * context.
+   * Returns a function that invokes the event handler below on tokens found in
+   * RegExp source.
+   *
+   * @param {{
+   *   wholeInput:   boolean,
+   *   startCharset: ?function(string),
+   *   range:        ?function(string),
+   *   endCharset:   ?function(string),
+   *   bracket:      ?function(string),
+   *   operators:    ?function(string),
+   *   count:        ?function(?number, ?number),
+   *   escape:       ?function(string),
+   *   backref:      ?function(int),
+   *   other:        ?function(string)
+   * }} eventHandler
+   * @return {!function(!Context, string):!Context} a function that takes
+   *    a start context, and RegExp source, and returns an end context.
    */
-  const CONTEXT_TOKENS = [
-      /^(?:([\{\[]|\(\??)|(?:[^\\\{\[\(]|\\[\s\S])+)/,
-      /^(?:(\])|(?:[^\]\\]|\\[\s\S])+)/,
-      /^(?:([\}])|[^\}]+)/,
-  ];
+  function parseRegExpSource(eventHandler) {
+    const {
+      wholeInput,  // Is the input whole.
+      startCharset,
+      range,
+      endCharset,
+      bracket,
+      operators,
+      count,
+      escape,
+      backref,
+      other: otherOpt
+    } = eventHandler;
+    const other = otherOpt || function () {};
+
+    // We compile an efficient regular expression that groups as many things as
+    // we don't care about as possible into runs of "other stuff".
+    const signature = 0
+            | (wholeInput ? 1 : 0)
+            | ((startCharset || endCharset || range) ? 2 : 0)
+            | (bracket ? 4 : 0)
+            | (operators ? 8 : 0)
+            | (escape ? 16 : 0)
+            | (backref ? 32 : 0);
+
+    var tokenizer = TOKENIZERS.get(signature);
+    if (!tokenizer) {
+      const tokens = [];
+      const careChars = new CharRanges();
+      const dontCareTokens = [];
+      if (escape || backref) {
+        if (backref) {
+          tokens.push('\\\\[1-9][0-9]*');
+        }
+        if (escape) {
+          tokens.push(
+            '\\\\(?:[xX][0-9a-fA-F]{2}|[uU][0-9a-fA-F]{4}|[^1-9xXuU])');
+        } else {
+          dontCareTokens.push('\\\\[^1-9]');
+        }
+      } else {
+        dontCareTokens.push('\\\\[\\s\\S]');
+      }
+      careChars.addRange('\\'.charCodeAt(0));
+
+      // If we have the whole input, and don't need to report charsets, then we
+      // can include them in dontCareTokens.
+      (
+        (startCharset || endCharset || range || !wholeInput)
+          ? tokens : dontCareTokens
+      ).push(
+        '\\[(?:[^\\]\\\\]|\\\\[\\S\\s])*\\]?'
+      );
+      careChars.addRange('['.charCodeAt(0));
+
+      // Reasoning is similar to charset above.
+      (
+        (count || !wholeInput)
+          ? tokens : dontCareTokens
+      ).push(
+        '[{]\\d*(?:,\\d*)?[}]?'
+      );
+      careChars.addRange('{'.charCodeAt(0));
+
+      if (bracket) {
+        tokens.push('[(](?:[?][:=!])?|[)]');
+        careChars.addRange('('.charCodeAt(0))
+          .addRange(')'.charCodeAt(0));
+      }
+
+      const operatorChars = '$^*+?|.';
+      if (operators) {
+        tokens.push(
+          '[' + operatorChars.replace(UNSAFE_CHARS_CHARSET, '\\$&') + ']');
+        for (var i = 0, nOpChars = operatorChars.length; i < nOpChars; ++i) {
+          careChars.addRange(operatorChars.charCodeAt(i));
+        }
+      }
+
+      // I really wish we had a nice way of composing regular expressions.
+      dontCareTokens.push('[' + careChars.inverse() + ']');
+      tokens.push('(?:' + dontCareTokens.join('|') + ')+');
+      tokenizer = new RegExp(tokens.join('|'), 'g');
+      TOKENIZERS.set(signature, tokenizer);
+    }
+
+    return function(startContext, source) {
+      var match;
+      var blockSource = String(source);
+      var outputContext = startContext;
+      switch (startContext) {
+      case Context.CHARSET:
+        // Strip off the unclosed CHARSET, dispatch it,
+        // and switch to block context.
+        match = blockSource.match(/^(?:[^\]\\]|\\[\S\s])*?\]/);
+        var ranges;
+        if (match) {
+          outputContext = Context.BLOCK;
+          blockSource = blockSource.substring(match[0].length);
+          ranges = match[0];
+          ranges = ranges.substring(ranges.length - 1);
+        } else {
+          ranges = blockSource;
+          blockSource = '';
+        }
+        if (range) {
+          parseCharsetRanges(range, ranges);
+        } else if (!endCharset) {
+          other(match ? match[0] : blockSource);
+        }
+        if (endCharset && outputContext !== Context.CHARSET) {
+          endCharset(match[0]);
+        }
+        break;
+      case Context.COUNT:
+        const rcurly = blockSource.indexOf('}');
+        const hasCurly = rcurly >= 0;
+        const end = hasCurly ? rcurly + 1 : blockSource.length;
+        (count || other)(blockSource.substring(0, end));
+        blockSource = blockSource.substring(end);
+        if (hasCurly) {
+          outputContext = Context.BLOCK;
+        }
+        break;
+      }
+
+      const sourceTokens = blockSource.match(tokenizer) || [];
+      const nSourceTokens = sourceTokens.length;
+
+      // Assert that our tokenizer matched the whole input.
+      var totalSourceTokenLength = 0;
+      for (var i = 0; i < nSourceTokens; ++i) {
+        totalSourceTokenLength += sourceTokens[i].length;
+      }
+      if (blockSource.length !== totalSourceTokenLength) {
+        throw new Error(
+          'Failed to tokenize ' + blockSource + ' with ' + tokenizer + '. Got '
+          + JSON.stringify(sourceTokens) + ' which have a length delta of '
+          + (blockSource.length - totalSourceTokenLength));
+      }
+
+      for (var i = 0; i < nSourceTokens; ++i) {
+        const sourceToken = sourceTokens[i];
+        switch (sourceToken[0]) {
+        case '[':
+          const isClosed = (
+            i + 1 < nSourceTokens || /(?:^|[^\\])(?:\\\\)*\]$/.test(sourceToken)
+          );
+          if (!isClosed) {
+            outputContext = Context.CHARSET;
+          }
+          if (startCharset || range) {
+            const start = sourceToken[1] === '^' ? '[^' : '[';
+            if (startCharset) {
+              startCharset(start);
+            }
+            if (range) {
+              const endPos = sourceToken.length + (isClosed ? -1 : 0);
+              parseCharsetRanges(
+                range, sourceToken.substring(start.length, endPos));
+            }
+          } else if (!endCharset) {
+            other(sourceToken);
+          }
+          if (isClosed && endCharset) {
+            endCharset(']');
+          }
+          break;
+        case '\\':
+          const ch1 = sourceToken[1];
+          (('1' <= ch1 && ch1 <= '9' ? backref : escape) || other)(sourceToken);
+          break;
+        case '(': case ')':
+          (bracket || other)(sourceToken);
+          break;
+        case '+': case '*': case '?': case '.': case '|': case '^': case '$':
+          (operators || other)(sourceToken);
+          break;
+        case '{':
+          if (count) {
+            const minMaxMatch = /^\{(\d*)(?:,(\d*))?/.exec(sourceToken);
+            const min = +minMaxMatch[1];
+            const max = +(minMaxMatch[2] || min);
+            count(min, max);
+          } else {
+            other(sourceToken);
+          }
+          if (i + 1 == nSourceTokens
+              && sourceToken[sourceToken.length - 1] !== '}') {
+            outputContext = Context.COUNT;
+          }
+          break;
+        default:
+          other(sourceToken);
+        }
+      }
+
+      return outputContext;
+    };
+  }
 
   /** Maps template literals to information derived from them. */
-  const CONTEXTS_CACHE = new WeakMap();
+  const STATIC_INFO_CACHE = new WeakMap();
 
   /**
    * Given the template literal parts, computes a record of
@@ -31,6 +246,7 @@ RegExp.make = (function () {
    * {
    *   contexts: [...],
    *   templateGroupCounts: [...],
+   *   splitLiterals: [...],
    * }
    *
    * For each value, value[i], contexts[i] is the context in which
@@ -38,63 +254,75 @@ RegExp.make = (function () {
    *
    * For each template literal, template.raw[i], templateGroupCounts[i]
    * is the number of capturing groups entered in that part.
+   *
+   * For each template literal, template.raw[i], splitLiterals[i] is
+   * an array that has template.raw[i] split around back-references and
+   * the back-references replaces with the index referred to, so
+   * the literal chunk 'foo\2bar' would split to ['foo', 2, 'bar'].
+   *
+   * @return {!{contexts            : Array.<!Context>,
+   *            templateGroupCounts : Array.<int>,
+   *            splitLiterals       : Array.<Array<(string|number)>>}}
    */
   function getStaticInfo(raw) {
-    var staticInfo = CONTEXTS_CACHE.get(raw);
+    var staticInfo = STATIC_INFO_CACHE.get(raw);
     if (staticInfo) { return staticInfo; }
 
     const contexts = [];
     const templateGroupCounts = [];
+    const splitLiterals = [];
 
-    var i = 0;
-    const n = raw.length;
-    var context = BLOCK;
-    // We step over parts and consume tokens until we reach an
-    // interpolation point.
-
-    var currentPart = raw[0];
+    var context = Context.BLOCK;
     var templateGroupCount = 0;
-    while (i < n || currentPart) {
-      if (!currentPart) {
-        // We've reached an interpolation point.
-        ++i;
-        currentPart = raw[i];
-        contexts.push(context);
-	templateGroupCounts.push(templateGroupCount);
-	templateGroupCount = 0;
-        continue;
+    var splitLiteral = [];
+
+    function pushSplitLiteral(s) {
+      const n = splitLiteral.length;
+      if (n && 'string' === typeof splitLiteral[n - 1]) {
+        splitLiteral[n - 1] += s;
+      } else {
+        splitLiteral[n] = s;
       }
-      var m = currentPart.match(CONTEXT_TOKENS[context]);
-      currentPart = currentPart.substring(m[0].length);
-      if (!m[0].length) { throw new Error(currentPart); }
-      if (m[1]) {
-        switch (context) {
-        case BLOCK:
-          switch (m[1]) {
-          case '[':  context = CHARSET;    break;
-          case '{':  context = COUNT;      break;
-	  case '(':  templateGroupCount++; // Fall-through
-	  case '(?': context = BLOCK;      break;
-          default: throw new Error(m[1]);
-          }
-          break;
-        default:
-          context = BLOCK;
-          break;
+    }
+
+    const parseHandler = {
+      wholeInput: false,
+      bracket: function (s) {
+        if (s === '(') {
+          ++templateGroupCount;
         }
+        pushSplitLiteral(s);
+      },
+      backref: function (s) {
+        splitLiteral.push(+s.substring(1));
+      },
+      other: function (s) {
+        pushSplitLiteral(s);
       }
+    };
+    const parse = parseRegExpSource(parseHandler);
+
+    const n = raw.length;
+    for (var i = 0; i < n; ++i) {
+      context = parse(context, raw[i]);
+      contexts.push(context);
+      templateGroupCounts.push(templateGroupCount);
+      splitLiterals.push(splitLiteral);
+
+      templateGroupCount = 0;
+      splitLiteral = [];
     }
 
     // We don't need the context after the last part
     // since no value is interpolated there.
     contexts.length--;
-    templateGroupCounts.push(templateGroupCount);
 
     const computed = {
       contexts: contexts,
-      templateGroupCounts: templateGroupCounts
+      templateGroupCounts: templateGroupCounts,
+      splitLiterals: splitLiterals
     };
-    CONTEXTS_CACHE.set(raw, computed);
+    STATIC_INFO_CACHE.set(raw, computed);
     return computed;
   }
 
@@ -132,7 +360,7 @@ RegExp.make = (function () {
   const MAX_CHAR_IN_RANGE = 0xFFFF;
 
   /**
-   *
+   * A range of characters.
    */
   function CharRanges(opt_ranges) {
     /**
@@ -152,6 +380,9 @@ RegExp.make = (function () {
      */
     this.ranges = opt_ranges ? opt_ranges.slice() : [];
   }
+  CharRanges.prototype.isEmpty = function () {
+    return !this.ranges.length;
+  };
   /**
    * Produces a string that has the same meaning in a RegExp charset.
    * Without enclosing square brackets.
@@ -189,7 +420,8 @@ RegExp.make = (function () {
     var right = right_opt || left;
     left = +left;
     right = +right;
-    if (left < 0 || right > MAX_CHAR_IN_RANGE || left > right
+    if ('number' !== typeof left
+        || left < 0 || right > MAX_CHAR_IN_RANGE || left > right
         || left % 1 || right % 1) {
       throw new Error();
     }
@@ -301,23 +533,21 @@ RegExp.make = (function () {
       this.ranges.map(function (x) { return x + (delta << 16); })
     );
   };
+  CharRanges.prototype.forEachRange = function (callback) {
+    const ranges = this.ranges;
+    const n = ranges.length;
+    for (var i = 0; i < n; ++i) {
+      const leftAndSpan = ranges[i];
+      const left = leftAndSpan >> 16;
+      const span = leftAndSpan & 0xFFFF;
+      const right = left + span;
+      callback(left, right);
+    }
+  };
+  CharRanges.prototype.clear = function () {
+    this.ranges.length = 0;
+  };
 
-  /** An escape sequence that is definitely not a back-reference. */
-  const ESCAPE_SEQUENCE_PATTERN =
-          '\\\\(?:u[\\da-fA-F]{4}|x[\\da-fA-F]{2}|[^1-9]?)';
-
-  /** Matches all RegExp parts that specify characters. */
-  const CHAR_RANGE_RELEVANT_OPERATORS = new RegExp(
-    [
-      ESCAPE_SEQUENCE_PATTERN,  // Escape sequence or boundary.
-      '\\[(?:[^\\]\\\\]|\\\\[\\s\\S]])*\\]',  // A charset
-      '[.]',  // Dot is a meta-character.
-      '[(](?:[?][:=!])?',  // (?: (?! (?=  ( don't contribute chars.
-      '[)]',
-      '[{]\\d*(?:,\\d*)?[}]',  // In x{1,2} only x contributes chars.
-      '[^\\\za\[()*?^$|.{]'  // A literal character
-    ].join('|'),
-    'g');
 
   /**
    * The characters matched by {@code /./}.
@@ -326,6 +556,88 @@ RegExp.make = (function () {
   const DOT_RANGES = new CharRanges()
           .addRange(0xA).addRange(0xD).addRange(0x2028, 0x2029)
           .inverse();
+
+  /**
+   * @param {string} source the source of a RegExp.
+   * @param {string} flags the flags of a RegExp.
+   * @return {string} the text of a charset that matches all code-units that
+   *    could appear in any string in the language matched by the input.
+   *    This is liberal.  For example {@code /ab{0}/} can match the string "a",
+   *    but cannot match the string "ab" because of the zero-count.
+   *    Lookaheads could similarly contribute characters unnecessarily.
+   */
+  function toCharRanges(source, flags) {
+    // We parse the source and try to find all character sets
+    // and literal characters, union them.
+
+    // Accumulate all ranges onto charRanges.
+    const charRanges = new CharRanges();
+    var negCharRanges = null;
+
+    parseRegExpSource(
+      {
+        wholeInput: true,
+        escape: function (esc) {
+          addEscapeValueTo(esc, false, charRanges);
+        },
+        operators: function (s) {
+          if (s.indexOf('.') >= 0) {
+            charRanges.addAll(DOT_RANGES);
+          }
+        },
+        count: function(_) {},
+        bracket: function (_) {},
+        startCharset: function (start) {
+          if (start[1] === '^') {
+            negCharRanges = new CharRanges();
+          }
+        },
+        endCharset: function (_) {
+          if (negCharRanges) {
+            charRanges.addAll(negCharRanges.inverse());
+            negCharRanges = null;
+          }
+        },
+        range: function (left, right) {
+          (negCharRanges || charRanges).addRange(left, right);
+        },
+        other: function (s) {
+          for (var i = 0, n = s.length; i < n; ++i) {
+            charRanges.addRange(s.charCodeAt(i));
+          }
+        }
+      })(
+      Context.BLOCK,
+      source);
+
+    if (flags.indexOf('i') >= 0) {
+      // Fold letters.
+      caseFold(charRanges);
+    }
+    charRanges.canonicalize();
+    return charRanges.toString();
+  }
+
+
+  /**
+   * Adds other-case forms of any ASCII letters in charRanges.
+   * @param {CharRanges} charRanges
+   */
+  function caseFold(charRanges) {
+    charRanges.canonicalize();
+    // TODO: Read spec and figure out what to do with non-ASCII characters.
+    // Maybe take flags and look for the 'u' flag.
+    const upperLetters = charRanges.intersectionWithRange(
+      'A'.charCodeAt(0), 'Z'.charCodeAt(0));
+    const lowerLetters = charRanges.intersectionWithRange(
+      'a'.charCodeAt(0), 'z'.charCodeAt(0));
+    charRanges.addAll(upperLetters.shifted(+32));
+    charRanges.addAll(lowerLetters.shifted(-32));
+  }
+
+  /** An escape sequence that is definitely not a back-reference. */
+  const ESCAPE_SEQUENCE_PATTERN =
+          '\\\\(?:u[\\da-fA-F]{4}|x[\\da-fA-F]{2}|[^1-9]?)';
 
   /**
    * Pattern for the start or end of a character range.
@@ -357,124 +669,44 @@ RegExp.make = (function () {
     + '(?:-(' + CHARSET_END_POINT_PATTERN + '))?'
   );
 
-
-  /**
-   * @param {string} source the source of a RegExp.
-   * @param {string} flags the flags of a RegExp.
-   * @return {string} the text of a charset that matches all code-units that
-   *    could appear in any string in the language matched by the input.
-   *    This is liberal.  For example {@code /ab{0}/} can match the string "a",
-   *    but cannot match the string "ab" because of the zero-count.
-   *    Lookaheads could similarly contribute characters unnecessarily.
-   */
-  function toCharRanges(source, flags) {
-    // We parse the source and try to find all character sets
-    // and literal characters, union them.
-    // TODO: We could try and fail when Kleene operators or
-    // handle charsets that are in negative lookaheads differently.
-    const interestingParts = source.match(CHAR_RANGE_RELEVANT_OPERATORS);
-    const n = interestingParts.length;
-
-    // Accumulate all ranges onto charRanges.
-    const charRanges = new CharRanges();
-
-    for (var i = 0; i < n; ++i) {
-      const interestingPart = interestingParts[i];
-      switch (interestingPart[0]) {
-      case '\\':
-        addEscapeValueTo(interestingPart, false, charRanges);
-        break;
-      case '.':
-        charRanges.add(DOT_RANGES);
-        break;
-      case '[':
-        addCharSetTo(interestingPart, charRanges);
-        break;
-      case '(': case ')': case '{':
-        break;
-      default:
-        charRanges.addRange(interestingPart.charCodeAt(0));
-      }
-    }
-
-    charRanges.canonicalize();
-    if (flags.indexOf('i') >= 0) {
-      // Fold letters.
-      // TODO: Read spec and figure out what to do with non-ASCII characters.
-      const upperLetters = charRanges.intersectionWithRange(
-        'A'.charCodeAt(0), 'Z'.charCodeAt(0));
-      const lowerLetters = charRanges.intersectionWithRange(
-        'a'.charCodeAt(0), 'z'.charCodeAt(0));
-      charRanges.addAll(upperLetters.shifted(+32));
-      charRanges.addAll(lowerLetters.shifted(-32));
-      charRanges.canonicalize();
-    }
-    return charRanges.toString();
-  }
-
   /** Space characters that match \s */
-  const SPACE_CHARS = addCharSetTo(
-    '[ \f\n\r\t\v\u00a0\u1680\u180e\u2000-\u200a'
-    + '\u2028\u2029\u202f\u205f\u3000\ufeff]',
-    new CharRanges());
+  const SPACE_CHARS = new CharRanges()
+      .addRange(0x9, 0xd)
+      .addRange(0x20)
+      .addRange(0xa0)
+      .addRange(0x1680)
+      .addRange(0x180e)
+      .addRange(0x2000, 0x200a)
+      .addRange(0x2028, 0x2029)
+      .addRange(0x202f)
+      .addRange(0x205f)
+      .addRange(0x3000)
+      .addRange(0xfeff);
   /** Word chars that match \w */
-  const WORD_CHARS = addCharSetTo(
-    '[A-Za-z0-9_]',
-    new CharRanges());
+  const WORD_CHARS = new CharRanges()
+      .addRange('A'.charCodeAt(0), 'Z'.charCodeAt(0))
+      .addRange('0'.charCodeAt(0), '9'.charCodeAt(0))
+      .addRange('a'.charCodeAt(0), 'z'.charCodeAt(0))
+      .addRange('_'.charCodeAt(0));
   /** Digit chars that match \d */
-  const DIGIT_CHARS = addCharSetTo(
-    '[0-9]',
-    new CharRanges());
+  const DIGIT_CHARS = new CharRanges()
+      .addRange('0'.charCodeAt(0), '9'.charCodeAt(0));
   /** Maps letters after \ that are special in RegExps. */
   const ESCAPE_SEQ_MAP = new Map([
-    ['s', SPACE_CHARS],
-    ['S', SPACE_CHARS.inverse()],
-    ['w', WORD_CHARS],
-    ['W', WORD_CHARS.inverse()],
-    ['d', DIGIT_CHARS],
-    ['D', DIGIT_CHARS.inverse()],
-    ['t', new CharRanges().addRange(0x9)],
-    ['n', new CharRanges().addRange(0xA)],
-    ['v', new CharRanges().addRange(0xB)],
-    ['f', new CharRanges().addRange(0xC)],
-    ['r', new CharRanges().addRange(0xD)],
+    ['\\s', SPACE_CHARS],
+    ['\\S', SPACE_CHARS.inverse()],
+    ['\\w', WORD_CHARS],
+    ['\\W', WORD_CHARS.inverse()],
+    ['\\d', DIGIT_CHARS],
+    ['\\D', DIGIT_CHARS.inverse()],
+    ['\\t', new CharRanges().addRange(0x9)],
+    ['\\n', new CharRanges().addRange(0xA)],
+    ['\\v', new CharRanges().addRange(0xB)],
+    ['\\f', new CharRanges().addRange(0xC)],
+    ['\\r', new CharRanges().addRange(0xD)],
     // b doesn't appear here since its meaning depends on context.
-    ['B', new CharRanges()]
+    ['\\B', new CharRanges()]
   ]);
-
-  /**
-   * Parses a RegExp charSet and adds its ranges to the given set.
-   *
-   * @param {string} charSet the text of a RegExp charset including any
-   *   square brackets.
-   * @param {CharRanges} ranges to add to.
-   *
-   * @return ranges to allow chaining.
-   */
-  function addCharSetTo(charSet, ranges) {
-    const isInverted = /^\[\^/.test(charSet);
-    const rangesToAddTo = isInverted ? new CharRanges() : ranges;
-    const body = charSet.replace(/^\[\^?|\]$/g, '');
-    const bodyParts = body.match(CHARSET_PARTS_RE);
-    const n = bodyParts.length;
-    for (var i = 0; i < n; ++i) {
-      const bodyPart = bodyParts[i];
-      if (bodyPart.indexOf('-') >= 0) {
-        const m = CHARSET_RANGE_RE.exec(bodyPart);
-        const lt = rangeEndPointToCodeUnit(m[1]);
-        const rt = m[2] ? rangeEndPointToCodeUnit(m[2]) : lt;
-        rangesToAddTo.addRange(lt, rt);
-      } else if (bodyPart[0] == '\\') {
-        addEscapeValueTo(bodyPart, true, rangesToAddTo);
-      } else {
-        rangesToAddTo.addRange(bodyPart.charCodeAt(0));
-      }
-    }
-    if (isInverted) {
-      ranges.addAll(rangesToAddTo.inverse());
-    }
-    return ranges;
-  }
 
   /**
    * The code-unit corresponding to the end-point of a range.
@@ -523,64 +755,133 @@ RegExp.make = (function () {
     return ranges;
   }
 
-  const PAREN_AND_BACKREF_RE = new RegExp(
-    '\\\\(?:[1-9]\\d*|\\D)'  // Back-reference or escape sequence
-    + '|\\[(?:[^\\\]\\\\]|\\\\[\s\S])*\\]'  // Don't look for parens in character groups
-    + '|\\(\\??',  // A group open.
-    'g'
-  );
+  /**
+   * Applies the given handler to the left and right end-points (inclusive)
+   * of the ranges in rangeText.
+   *
+   * @param {function(number, number)} handler receives 2 code-units.
+   * @param {string} rangeText text of a RegExp charSet body.
+   */
+  function parseCharsetRanges(handler, rangeText) {
+    const tokens = rangeText.match(CHARSET_PARTS_RE);
+    const n = tokens.length;
+    for (var i = 0; i < n; ++i) {
+      const token = tokens[i];
+      const m = CHARSET_RANGE_RE.exec(token);
+      if (m[2]) {
+        handler(
+          rangeEndPointToCodeUnit(m[1]),
+          rangeEndPointToCodeUnit(m[2]));
+      } else if (token[0] === '\\') {
+        const ranges = new CharRanges();
+        addEscapeValueTo(token, true, ranges);
+        ranges.forEachRange(handler);
+      } else {
+        const cu = token.charCodeAt(0);
+        handler(cu, cu);
+      }
+    }
+  }
 
-  function fixUpInterpolatedRegExp(source, regexGroupCount, templateGroups) {
+
+  /**
+   * Adjusts an interpolated RegExp so that it can be interpolated in
+   * the context of the template while preserving the meaning of
+   * back-references and character sets.
+   *
+   * @param {string} containerFlags the flags of the RegExp into which source
+   *    is being interpolated.
+   * @param {string} source the source of a RegExp being interpolated.
+   * @param {string} flags associated with source.
+   * @param {int} regexGroupCount The number of capturing groups that are opened
+   *    before source is interpolated.
+   * @param {Array.<int>} see the documentation for make for the contract.
+   *    It only contains entries for capturing groups opened before the
+   *    insertion point.
+   *
+   * @return [fixedSource, countOfCapturingGroupsInFixedSource]
+   */
+  function fixUpInterpolatedRegExp(
+    containerFlags, source, flags, regexGroupCount, templateGroups) {
     // Count capturing groups, and use that to identify and
     // renumber back-references that are in scope.
     var sourceGroupCount = 0;
     var hasBackRef = false;
+    const fixedSource = [];
 
-    const parts = source.match(PAREN_AND_BACKREF_RE);
-    const n = parts ? parts.length : 0;
-    for (var i = 0; i < n; ++i) {
-      const part = parts[i];
-      switch (part[0]) {
-      case '\\':
-        hasBackRef = hasBackRef || !isNaN(+part.substring(1));
-        break;
-      case '[':
-        break;
-      case '(':
-        if (part === '(') {  // Not the start of a non-capturing group
+    function append(tok) { fixedSource.push(tok); }
+
+    const parseHandler = {
+      bracket: function (tok) {
+        if (tok === '(') {
           ++sourceGroupCount;
+        }
+        fixedSource.push(tok);
+      },
+      other: append
+    };
+
+    // Convert back-refs to numbers so we can renumber them below.
+    if (regexGroupCount || templateGroups.length) {
+      parseHandler.backref = function (tok) {
+        hasBackRef = true;
+        fixedSource.push(+tok.substring(1));
+      };
+    }
+
+    const isCaseInsensitive = flags.indexOf('i') >= 0;
+    if (isCaseInsensitive && containerFlags.indexOf('i') < 0) {
+      // Expand literal letters and letters in charsets.
+      parseHandler.startCharset = append;
+      const ranges = new CharRanges();
+      parseHandler.range = function (left, right) {
+        ranges.addRange(left, right);
+      };
+      parseHandler.endCharset = function (s) {
+        caseFold(ranges);
+        fixedSource.push(ranges.toString(), s);
+        ranges.clear();
+      };
+      parseHandler.other = function (tok) {
+        fixedSource.push(tok.replace(
+          /\\\\[\s\S]|[A-Za-z]/g,
+          function (s) {
+            if (s.length === 1) {
+              const cu = s.charCodeAt(0) & ~32;
+              if (65 <= cu && cu <= 90) {
+                return '[' + String.fromCharCode(cu, cu | 32) + ']';
+              }
+            }
+            return s;
+          }));
+      };
+    }
+
+    parseRegExpSource(parseHandler)(Context.BLOCK, source);
+
+    // Rewrite back-references that are out of scope to refer
+    // to the template group.
+    if (hasBackRef) {
+      for (var i = 0, n = fixedSource.length; i < n; ++i) {
+        var el = fixedSource[i];
+        if ('number' === typeof el) {
+          const backRefIndex = el;
+          if (backRefIndex <= sourceGroupCount) {
+            // A local reference.
+            el = '\\' + (backRefIndex + regexGroupCount - 1);
+          } else if (backRefIndex < templateGroups.length) {
+            // A reference to a template group that is in scope.
+            el = '\\' + templateGroups[backRefIndex];
+          } else {
+            // An out of scope back-reference matches the empty string.
+            el = '(?:)';
+          }
+          fixedSource[i] = el;
         }
       }
     }
 
-    // Rewrite back-references that are out of scope to refer
-    // to the template group.
-    var fixedSource = source;
-    if (sourceGroupCount && hasBackRef && regexGroupCount) {
-      fixedSource = source.replace(
-        PAREN_AND_BACKREF_RE,
-        function (part) {
-          if (part[0] == '\\') {
-            var backRefIndex = +part.substring(1);
-            if (backRefIndex === backRefIndex) {
-              if (backRefIndex <= sourceGroupCount) {
-                // A local reference.
-                return '\\' + (backRefIndex + regexGroupCount - 1);
-              } else if (backRefIndex < templateGroups.length) {
-                // A reference to a template group that is in scope.
-                return '\\' + templateGroups[backRefIndex];
-              } else {
-                // An out of scope back-reference matches the empty string.
-                return '(?:)';
-              }
-            }
-          }
-          return part;
-        }
-      );
-    }
-
-    return [fixedSource, sourceGroupCount];
+    return [fixedSource.join(''), sourceGroupCount];
   }
 
   function make(flags, template, ...values) {
@@ -592,7 +893,7 @@ RegExp.make = (function () {
     }
 
     const raw = template.raw;
-    const { contexts, templateGroupCounts } = getStaticInfo(raw);
+    const { contexts, templateGroupCounts, splitLiterals } = getStaticInfo(raw);
 
     const n = contexts.length;
 
@@ -615,25 +916,25 @@ RegExp.make = (function () {
 
     for (var i = 0; i < n; ++i) {
       const context = contexts[i];
-      const value = values[i];
+      var value = values[i];
+      if (value == null) {
+        value = '';
+      }
       var subst;
       switch (context) {
-      case BLOCK:
+      case Context.BLOCK:
         if (value instanceof RegExp) {
           const [valueSource, valueGroupCount] = fixUpInterpolatedRegExp(
-            String(value.source), regexGroupCount, templateGroups);
+            flags, String(value.source), value.flags,
+            regexGroupCount, templateGroups);
           subst = '(?:' + valueSource + ')';
           regexGroupCount += valueGroupCount;
         } else {
-          subst = '(?:'
-            + String(value).replace(UNSAFE_CHARS_BLOCK, '\\$&')
-            + ')';
+          subst =
+            '(?:' + String(value).replace(UNSAFE_CHARS_BLOCK, '\\$&') + ')';
         }
         break;
-      case COUNT:
-        subst = (+value || '0');
-        break;
-      case CHARSET:
+      case Context.CHARSET:
         // TODO: We need to keep track of whether we're interpolating
         // into an inverted charset or not.
         subst =
@@ -641,9 +942,35 @@ RegExp.make = (function () {
           ? toCharRanges(String(value.source), String(value.flags))
           : String(value).replace(UNSAFE_CHARS_CHARSET, '\\$&');
         break;
+      case Context.COUNT:
+        subst = String(value instanceof RegExp ? value.source : value);
       }
+
+      var rawLiteralPart = raw[i+1];
+      var splitLiteral = splitLiterals[i + 1];
+      if (regexGroupCount !== templateGroups.length
+          && (splitLiteral.length !== 1
+              || 'string' !== typeof splitLiteral[0])) {
+        const splitCopy = splitLiteral.slice(0);
+        for (var j = 0, splitLength = splitCopy.length; j < splitLength; ++j) {
+          const splitElement = splitCopy[j];
+          if ('number' === typeof splitElement) {
+            if (splitElement < templateGroups.length) {
+              // A reference to a template group that is in scope.
+              splitCopy[j] = '\\' + templateGroups[splitElement];
+            } else {
+              // An out of scope back-reference matches the empty string.
+              // We can't just use the empty string, because returning nothing
+              // would change the way that postfix operators like * attach.
+              splitCopy[j] = '(?:)';
+            }
+          }
+        }
+        rawLiteralPart = splitCopy.join('');
+      }
+
       pattern += subst;
-      pattern += raw[i+1];
+      pattern += rawLiteralPart;
       addTemplateGroups(i+1);
     }
     const output = new RegExp(pattern, flags);
