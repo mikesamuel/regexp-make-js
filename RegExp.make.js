@@ -544,6 +544,10 @@ RegExp.make = (function () {
       callback(left, right);
     }
   };
+  CharRanges.prototype.clear = function () {
+    this.ranges.length = 0;
+  };
+
 
   /**
    * The characters matched by {@code /./}.
@@ -578,7 +582,7 @@ RegExp.make = (function () {
         },
         operators: function (s) {
           if (s.indexOf('.') >= 0) {
-            charRanges.add(DOT_RANGES);
+            charRanges.addAll(DOT_RANGES);
           }
         },
         count: function(_) {},
