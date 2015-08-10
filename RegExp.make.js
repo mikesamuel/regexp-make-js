@@ -5,7 +5,7 @@
 RegExp.make = (function () {
   "use strict";
 
-  /** @enum{int} */
+  /** @enum{number} */
   const Context = {
     /** A context in which any top-level RegExp operator can appear. */
     BLOCK: 0,
@@ -15,6 +15,275 @@ RegExp.make = (function () {
     COUNT: 2
   };
 
+
+  /**
+   * Matches characters that have special meaning at
+   * the top-level of a RegExp.
+   */
+  const UNSAFE_CHARS_BLOCK = /[\\(){}\[\]\|\?\*\+\^\$\/.]/g;
+  /**
+   * Matches characters that have special meaning within
+   * a RegExp charset.
+   */
+  const UNSAFE_CHARS_CHARSET = /[\[\]\-\\]/g;
+
+  /**
+   * Encodes the end-point of a character range in a RegExp charset.
+   *
+   * @param {number} n a UTF-16 code-unit.
+   * @return {string} of regexp suitable for embedding in a charset.
+   */
+  function encodeRangeEndPoint(n) {
+    if (0x20 <= n && n <= 0x7e) {
+      return String.fromCharCode(n).replace(UNSAFE_CHARS_CHARSET, '\\$&');
+    }
+    var hex = n.toString(16);
+    return '\\u0000'.substring(0, 6 - hex.length) + hex;
+  }
+
+  /**
+   * Max code-unit is the maximum UTF-16 code-unit since
+   *   /^[\ud800\udc00]$/.test('\ud800\udc00') is false
+   * and
+   *   /^[\ud800\udc00]$/.test('\ud800') is true.
+   * TODO: Take into account 'u' flag.
+   */
+  const MAX_CHAR_IN_RANGE = 0xFFFF;
+
+  /**
+   * A range of characters.
+   * @param  {!Array.<number>=} opt_ranges
+   * @constructor
+   */
+  function CharRanges(opt_ranges) {
+    /**
+     * A series of ints bit-packed with the minimum in the high 16 bits and
+     * the difference between the max and the min in the low 16 bits.
+     *
+     * The range consisting of the letter 'A' is then [0x00410000] which has
+     * the char code for 'A' (65 == 0x41) in the top half, and the difference
+     * between the min and max (0) in the lower 16 bits.
+     *
+     * The range [a-z] is represented as [0x00610019] which has the char code
+     * for 'a' (97 == 0x61) in the upper four bits, and the difference between
+     * min and max (25 == 0x19) in the lower 16 bits.
+     *
+     * @private
+     * @type {!Array.<number>}
+     */
+    this.ranges = opt_ranges ? opt_ranges.slice() : [];
+  }
+  /**
+   * @this {!CharRanges}
+   * @return {boolean}
+   */
+  CharRanges.prototype.isEmpty = function () {
+    return !this.ranges.length;
+  };
+  /**
+   * Produces a string that has the same meaning in a RegExp charset.
+   * Without enclosing square brackets.
+   * @override
+   * @this {!CharRanges}
+   */
+  CharRanges.prototype.toString = function () {
+    var s = '';
+    /** @type {!Array.<number>}. */
+    const ranges = this.ranges;
+    /** @type {number} */
+    const n = ranges.length;
+    for (var i = 0; i < n; ++i) {
+      /** @type {number} */
+      const leftAndSpan = ranges[i];
+      const left = leftAndSpan >> 16;
+      const span = leftAndSpan & 0xffff;
+      s += encodeRangeEndPoint(left);
+      if (span) {
+        if (span !== 1) { s += '-'; }
+        s += encodeRangeEndPoint(left + span);
+      }
+    }
+    return s;
+  };
+  /**
+   * The minimum code-point matched or NaN.
+   * @this {!CharRanges}
+   * @return {number|undefined}
+   */
+  CharRanges.prototype.getMin = function () {
+    this.canonicalize();
+    /** @type {!Array.<number>} */
+    const ranges = this.ranges;
+    return ranges.length ? (ranges[0] >> 16) : undefined;
+  };
+  /**
+   * Adds a range starting at left and going to right, inclusive.
+   *
+   * @this {!CharRanges}
+   * @param {number} left inclusive code-unit
+   * @param {number=} opt_right inclusive code-unit.  left is assumed if absent.
+   * @return {!CharRanges} this to allow chaining.
+   */
+  CharRanges.prototype.addRange = function (left, opt_right) {
+    var right = opt_right || left;
+    left = +left;
+    right = +right;
+    if ('number' !== typeof left
+        || left < 0 || right > MAX_CHAR_IN_RANGE || left > right
+        || left % 1 || right % 1) {
+      throw new Error();
+    }
+    this.ranges.push((left << 16) | ((right - left) & 0xFFFF));
+    return this;
+  };
+  /**
+   * Adds the given ranges to this.
+   * Modifies this in place making it the union of its prior value and ranges.
+   *
+   * @this {!CharRanges}
+   * @param {CharRanges} ranges
+   * @return {!CharRanges} this to allow chaining.
+   */
+  CharRanges.prototype.addAll = function (ranges) {
+    if (ranges !== this) {
+      Array.prototype.push.apply(this.ranges, ranges.ranges);
+    }
+    return this;
+  };
+  /**
+   * @this {!CharRanges}
+   * @return {!CharRanges} [\u0000-\uFFFF] - this.
+   *    Allocates a new output.  Does not modify in place.
+   */
+  CharRanges.prototype.inverse = function () {
+    this.canonicalize();
+    /** @type {!Array.<number>} */
+    const ranges = this.ranges;
+    /** @type {number} */
+    const n = ranges.length;
+    var pastLastRight = 0;
+    const invertedRanges = [];
+    for (var i = 0; i < n; ++i) {
+      /** @type {number} */
+      const leftAndSpan = ranges[i];
+      const left = leftAndSpan >> 16;
+      const span = leftAndSpan & 0xFFFF;
+      if (pastLastRight < left) {
+        invertedRanges.push(
+          (pastLastRight << 16)
+            | (left - pastLastRight - 1)
+        );
+      }
+      pastLastRight = left + span + 1;
+    }
+    if (pastLastRight <= MAX_CHAR_IN_RANGE) {
+      invertedRanges.push(
+        (pastLastRight << 16)
+          | (MAX_CHAR_IN_RANGE - pastLastRight));
+    }
+    return new CharRanges(invertedRanges);
+  };
+  /**
+   * Orders ranges and merges overlapping ranges.
+   * @this {!CharRanges}
+   * @return {!CharRanges} this to allow chaining.
+   */
+  CharRanges.prototype.canonicalize = function () {
+    // Sort ranges so that they are ordered by left.
+    /** @type {!Array.<number>} */
+    const ranges = this.ranges;
+    /** @type {number} */
+    const n = ranges.length;
+    if (!n) { return this; }
+    ranges.sort(function (a, b) { return a - b; });
+    // Merge overlapping ranges.
+    var j = 1;  // Index into ranges past last merged item.
+    var lastRight = (ranges[0] >> 16) + ranges[0] & 0xFFFF;
+    for (var i = 1; i < n; ++i) {
+      /** @type {number} */
+      const leftAndSpan = ranges[i];
+      const left = leftAndSpan >> 16;
+      const span = leftAndSpan & 0xFFFF;
+      if (lastRight + 1 >= left) {
+        // We can merge the two.
+        const lastLeft = ranges[j - 1] >> 16;
+        lastRight = Math.max(lastRight, left + span);
+        const merged = (lastLeft << 16) | (lastRight - lastLeft);
+        ranges[j - 1] = merged;
+        // Do not increment j.
+      } else {
+        ranges[j] = leftAndSpan;
+        lastRight = left + span;
+        ++j;
+      }
+    }
+    ranges.length = j;
+    return this;
+  };
+  /**
+   * A newly allocated set with those elements in this that fall inside
+   * {@code new CharRanges().addRange(min, max)}.
+   * @this {!CharRanges}
+   * @param {number} min inclusive
+   * @param {number} max inclusive
+   * @return {!CharRanges} a newly allocated output.  Not modified in place.
+   */
+  CharRanges.prototype.intersectionWithRange = function (min, max) {
+    /** @type {!Array.<number>} */
+    const ranges = this.ranges;
+    const intersection = new CharRanges();
+    /** @type {number} */
+    const n = ranges.length;
+    for (var i = 0; i < n; ++i) {
+      /** @type {number} */
+      const leftAndSpan = ranges[i];
+      const left = leftAndSpan >> 16;
+      const span = leftAndSpan & 0xFFFF;
+      /** @type {number} */
+      const right = left + span;
+
+      if (!(left > max || right < min)) {
+        intersection.addRange(Math.max(min, left), Math.min(max, right));
+      }
+    }
+    return intersection;
+  };
+  /**
+   * The ranges but with each ranges left-end-point shifted by delta.
+   * @this {!CharRanges}
+   * @param {number} delta
+   * @return {!CharRanges} a newly allocated output.  Not modified in place.
+   */
+  CharRanges.prototype.shifted = function (delta) {
+    return new CharRanges(
+      this.ranges.map(function (x) { return x + (delta << 16); })
+    );
+  };
+  /**
+   * Applies callback to each range.
+   * @param {function(number, number)} callback receives left and right inclusive.
+   * @this {!CharRanges}
+   */
+  CharRanges.prototype.forEachRange = function (callback) {
+    /** @type {!Array.<number>} */
+    const ranges = this.ranges;
+    /** @type {number} */
+    const n = ranges.length;
+    for (var i = 0; i < n; ++i) {
+      /** @type {number} */
+      const leftAndSpan = ranges[i];
+      const left = leftAndSpan >> 16;
+      const span = leftAndSpan & 0xFFFF;
+      /** @type {number} */
+      const right = left + span;
+      callback(left, right);
+    }
+  };
+  CharRanges.prototype.clear = function () {
+    this.ranges.length = 0;
+  };
+
+
   const TOKENIZERS = new Map();
 
   /**
@@ -23,15 +292,15 @@ RegExp.make = (function () {
    *
    * @param {{
    *   wholeInput:   boolean,
-   *   startCharset: ?function(string),
-   *   range:        ?function(string),
-   *   endCharset:   ?function(string),
-   *   bracket:      ?function(string),
-   *   operators:    ?function(string),
-   *   count:        ?function(?number, ?number),
-   *   escape:       ?function(string),
-   *   backref:      ?function(int),
-   *   other:        ?function(string)
+   *   startCharset: (function(string) | undefined),
+   *   range:        (function(number, number) | undefined),
+   *   endCharset:   (function(string) | undefined),
+   *   bracket:      (function(string) | undefined),
+   *   operators:    (function(string) | undefined),
+   *   count:        (function(?number, ?number) | undefined),
+   *   escape:       (function(string) | undefined),
+   *   backref:      (function(number) | undefined),
+   *   other:        (function(string) | undefined)
    * }} eventHandler
    * @return {!function(!Context, string):!Context} a function that takes
    *    a start context, and RegExp source, and returns an end context.
@@ -49,6 +318,7 @@ RegExp.make = (function () {
       backref,
       other: otherOpt
     } = eventHandler;
+    /** @type {function(string)} */
     const other = otherOpt || function () {};
 
     // We compile an efficient regular expression that groups as many things as
@@ -123,6 +393,7 @@ RegExp.make = (function () {
     }
 
     return function(startContext, source) {
+      /** @type {?Array.<string>} */
       var match;
       var blockSource = String(source);
       var outputContext = startContext;
@@ -151,8 +422,10 @@ RegExp.make = (function () {
         }
         break;
       case Context.COUNT:
+        /** @type {number} */
         const rcurly = blockSource.indexOf('}');
         const hasCurly = rcurly >= 0;
+        /** @type {number} */
         const end = hasCurly ? rcurly + 1 : blockSource.length;
         (count || other)(blockSource.substring(0, end));
         blockSource = blockSource.substring(end);
@@ -162,8 +435,10 @@ RegExp.make = (function () {
         break;
       }
 
+      /** @type {?Array.<string>} */
       const sourceTokens = blockSource.match(tokenizer) || [];
-      const nSourceTokens = sourceTokens.length;
+      /** @type {number} */
+      const nSourceTokens = sourceTokens ? sourceTokens.length : 0;
 
       // Assert that our tokenizer matched the whole input.
       var totalSourceTokenLength = 0;
@@ -178,9 +453,11 @@ RegExp.make = (function () {
       }
 
       for (var i = 0; i < nSourceTokens; ++i) {
+        /** @type {string} */
         const sourceToken = sourceTokens[i];
         switch (sourceToken[0]) {
         case '[':
+          /** @type {boolean} */
           const isClosed = (
             i + 1 < nSourceTokens || /(?:^|[^\\])(?:\\\\)*\]$/.test(sourceToken)
           );
@@ -193,6 +470,7 @@ RegExp.make = (function () {
               startCharset(start);
             }
             if (range) {
+              /** @type {number} */
               const endPos = sourceToken.length + (isClosed ? -1 : 0);
               parseCharsetRanges(
                 range, sourceToken.substring(start.length, endPos));
@@ -205,6 +483,7 @@ RegExp.make = (function () {
           }
           break;
         case '\\':
+          /** @type {string} */
           const ch1 = sourceToken[1];
           (('1' <= ch1 && ch1 <= '9' ? backref : escape) || other)(sourceToken);
           break;
@@ -216,9 +495,10 @@ RegExp.make = (function () {
           break;
         case '{':
           if (count) {
+            /** @type {?Array.<string>} */
             const minMaxMatch = /^\{(\d*)(?:,(\d*))?/.exec(sourceToken);
-            const min = +minMaxMatch[1];
-            const max = +(minMaxMatch[2] || min);
+            const min = minMaxMatch ? +minMaxMatch[1] : 0;
+            const max = +(minMaxMatch && minMaxMatch[2] || min);
             count(min, max);
           } else {
             other(sourceToken);
@@ -260,9 +540,10 @@ RegExp.make = (function () {
    * the back-references replaces with the index referred to, so
    * the literal chunk 'foo\2bar' would split to ['foo', 2, 'bar'].
    *
-   * @return {!{contexts            : Array.<!Context>,
-   *            templateGroupCounts : Array.<int>,
-   *            splitLiterals       : Array.<Array<(string|number)>>}}
+   * @param {!Array.<string>} raw template literal parts.
+   * @return {!{contexts            : !Array.<!Context>,
+   *            templateGroupCounts : !Array.<number>,
+   *            splitLiterals       : !Array.<!Array<(string|number)>>}}
    */
   function getStaticInfo(raw) {
     var staticInfo = STATIC_INFO_CACHE.get(raw);
@@ -277,6 +558,7 @@ RegExp.make = (function () {
     var splitLiteral = [];
 
     function pushSplitLiteral(s) {
+      /** @type {number} */
       const n = splitLiteral.length;
       if (n && 'string' === typeof splitLiteral[n - 1]) {
         splitLiteral[n - 1] += s;
@@ -300,8 +582,10 @@ RegExp.make = (function () {
         pushSplitLiteral(s);
       }
     };
+    /** @type {function(!Context, string):!Context} */
     const parse = parseRegExpSource(parseHandler);
 
+    /** @type {number} */
     const n = raw.length;
     for (var i = 0; i < n; ++i) {
       context = parse(context, raw[i]);
@@ -325,229 +609,6 @@ RegExp.make = (function () {
     STATIC_INFO_CACHE.set(raw, computed);
     return computed;
   }
-
-  /**
-   * Matches characters that have special meaning at
-   * the top-level of a RegExp.
-   */
-  const UNSAFE_CHARS_BLOCK = /[\\(){}\[\]\|\?\*\+\^\$\/.]/g;
-  /**
-   * Matches characters that have special meaning within
-   * a RegExp charset.
-   */
-  const UNSAFE_CHARS_CHARSET = /[\[\]\-\\]/g;
-
-  /**
-   * Encodes the end-point of a character range in a RegExp charset.
-   *
-   * @param {int} n a UTF-16 code-unit.
-   * @return {string} of regexp suitable for embedding in a charset.
-   */
-  function encodeRangeEndPoint(n) {
-    if (0x20 <= n && n <= 0x7e) {
-      return String.fromCharCode(n).replace(UNSAFE_CHARS_CHARSET, '\\$&');
-    }
-    var hex = n.toString(16);
-    return '\\u0000'.substring(0, 6 - hex.length) + hex;
-  }
-
-  /**
-   * Max code-unit is the maximum UTF-16 code-unit since
-   *   /^[\ud800\udc00]$/.test('\ud800\udc00') is false
-   * and
-   *   /^[\ud800\udc00]$/.test('\ud800') is true.
-   */
-  const MAX_CHAR_IN_RANGE = 0xFFFF;
-
-  /**
-   * A range of characters.
-   */
-  function CharRanges(opt_ranges) {
-    /**
-     * A series of ints bit-packed with the minimum in the high 16 bits and
-     * the difference between the max and the min in the low 16 bits.
-     *
-     * The range consisting of the letter 'A' is then [0x00410000] which has
-     * the char code for 'A' (65 == 0x41) in the top half, and the difference
-     * between the min and max (0) in the lower 16 bits.
-     *
-     * The range [a-z] is represented as [0x00610019] which has the char code
-     * for 'a' (97 == 0x61) in the upper four bits, and the difference between
-     * min and max (25 == 0x19) in the lower 16 bits.
-     *
-     * @private
-     * @type {Array.<int>}
-     */
-    this.ranges = opt_ranges ? opt_ranges.slice() : [];
-  }
-  CharRanges.prototype.isEmpty = function () {
-    return !this.ranges.length;
-  };
-  /**
-   * Produces a string that has the same meaning in a RegExp charset.
-   * Without enclosing square brackets.
-   */
-  CharRanges.prototype.toString = function () {
-    var s = '';
-    const ranges = this.ranges;
-    const n = ranges.length;
-    for (var i = 0; i < n; ++i) {
-      const leftAndSpan = ranges[i];
-      const left = leftAndSpan >> 16;
-      const span = leftAndSpan & 0xffff;
-      s += encodeRangeEndPoint(left);
-      if (span) {
-        if (span !== 1) { s += '-'; }
-        s += encodeRangeEndPoint(left + span);
-      }
-    }
-    return s;
-  };
-  /** The minimum code-point matched or NaN. */
-  CharRanges.prototype.getMin = function () {
-    this.canonicalize();
-    const ranges = this.ranges;
-    return ranges.length ? (ranges[0] >> 16) : undefined;
-  };
-  /**
-   * Adds a range starting at left and going to right, inclusive.
-   *
-   * @param {int} left inclusive code-unit
-   * @param {int} right_opt inclusive code-unit.  left is assumed if absent.
-   * @return {CharRanges} this to allow chaining.
-   */
-  CharRanges.prototype.addRange = function (left, right_opt) {
-    var right = right_opt || left;
-    left = +left;
-    right = +right;
-    if ('number' !== typeof left
-        || left < 0 || right > MAX_CHAR_IN_RANGE || left > right
-        || left % 1 || right % 1) {
-      throw new Error();
-    }
-    this.ranges.push((left << 16) | ((right - left) & 0xFFFF));
-    return this;
-  };
-  /**
-   * Adds the given ranges to this.
-   * Modifies this in place making it the union of its prior value and ranges.
-   *
-   * @param {CharRanges} ranges
-   * @return {CharRanges} this to allow chaining.
-   */
-  CharRanges.prototype.addAll = function (ranges) {
-    if (ranges !== this) {
-      Array.prototype.push.apply(this.ranges, ranges.ranges);
-    }
-    return this;
-  };
-  /**
-   * @return {CharRanges} [\u0000-\uFFFF] - this.
-   *    Allocates a new output.  Does not modify in place.
-   */
-  CharRanges.prototype.inverse = function () {
-    this.canonicalize();
-    const ranges = this.ranges;
-    const n = ranges.length;
-    var pastLastRight = 0;
-    const invertedRanges = [];
-    for (var i = 0; i < n; ++i) {
-      const leftAndSpan = ranges[i];
-      const left = leftAndSpan >> 16;
-      const span = leftAndSpan & 0xFFFF;
-      if (pastLastRight < left) {
-        invertedRanges.push(
-          (pastLastRight << 16)
-            | (left - pastLastRight - 1)
-        );
-      }
-      pastLastRight = left + span + 1;
-    }
-    if (pastLastRight <= MAX_CHAR_IN_RANGE) {
-      invertedRanges.push(
-        (pastLastRight << 16)
-          | (MAX_CHAR_IN_RANGE - pastLastRight));
-    }
-    return new CharRanges(invertedRanges);
-  };
-  /**
-   * Orders ranges and merges overlapping ranges.
-   * @return {CharRanges} this to allow chaining.
-   */
-  CharRanges.prototype.canonicalize = function () {
-    // Sort ranges so that they are ordered by left.
-    const ranges = this.ranges;
-    const n = ranges.length;
-    if (!n) { return this; }
-    ranges.sort(function (a, b) { return a - b; });
-    // Merge overlapping ranges.
-    var j = 1;  // Index into ranges past last merged item.
-    var lastRight = (ranges[0] >> 16) + ranges[0] & 0xFFFF;
-    for (var i = 1; i < n; ++i) {
-      const leftAndSpan = ranges[i];
-      const left = leftAndSpan >> 16;
-      const span = leftAndSpan & 0xFFFF;
-      if (lastRight + 1 >= left) {
-        // We can merge the two.
-        const lastLeft = ranges[j - 1] >> 16;
-        lastRight = Math.max(lastRight, left + span);
-        const merged = (lastLeft << 16) | (lastRight - lastLeft);
-        ranges[j - 1] = merged;
-        // Do not increment j.
-      } else {
-        ranges[j] = leftAndSpan;
-        lastRight = left + span;
-        ++j;
-      }
-    }
-    ranges.length = j;
-    return this;
-  };
-  /**
-   * A newly allocated set with those elements in this that fall inside
-   * {@code new CharRanges().addRange(min, max)}.
-   * @return {CharRanges} a newly allocated output.  Not modified in place.
-   */
-  CharRanges.prototype.intersectionWithRange = function (min, max) {
-    const ranges = this.ranges;
-    const intersection = new CharRanges();
-    const n = ranges.length;
-    for (var i = 0; i < n; ++i) {
-      const leftAndSpan = ranges[i];
-      const left = leftAndSpan >> 16;
-      const span = leftAndSpan & 0xFFFF;
-      const right = left + span;
-
-      if (!(left > max || right < min)) {
-        intersection.addRange(Math.max(min, left), Math.min(max, right));
-      }
-    }
-    return intersection;
-  };
-  /**
-   * The ranges but with each ranges left-end-point shifted by delta.
-   * @return {CharRanges} a newly allocated output.  Not modified in place.
-   */
-  CharRanges.prototype.shifted = function (delta) {
-    return new CharRanges(
-      this.ranges.map(function (x) { return x + (delta << 16); })
-    );
-  };
-  CharRanges.prototype.forEachRange = function (callback) {
-    const ranges = this.ranges;
-    const n = ranges.length;
-    for (var i = 0; i < n; ++i) {
-      const leftAndSpan = ranges[i];
-      const left = leftAndSpan >> 16;
-      const span = leftAndSpan & 0xFFFF;
-      const right = left + span;
-      callback(left, right);
-    }
-  };
-  CharRanges.prototype.clear = function () {
-    this.ranges.length = 0;
-  };
-
 
   /**
    * The characters matched by {@code /./}.
@@ -627,8 +688,10 @@ RegExp.make = (function () {
     charRanges.canonicalize();
     // TODO: Read spec and figure out what to do with non-ASCII characters.
     // Maybe take flags and look for the 'u' flag.
+    /** @type {CharRanges} */
     const upperLetters = charRanges.intersectionWithRange(
       'A'.charCodeAt(0), 'Z'.charCodeAt(0));
+    /** @type {CharRanges} */
     const lowerLetters = charRanges.intersectionWithRange(
       'a'.charCodeAt(0), 'z'.charCodeAt(0));
     charRanges.addAll(upperLetters.shifted(+32));
@@ -669,7 +732,10 @@ RegExp.make = (function () {
     + '(?:-(' + CHARSET_END_POINT_PATTERN + '))?'
   );
 
-  /** Space characters that match \s */
+  /**
+   * Space characters that match \s
+   * @type {CharRanges}
+   */
   const SPACE_CHARS = new CharRanges()
       .addRange(0x9, 0xd)
       .addRange(0x20)
@@ -682,16 +748,25 @@ RegExp.make = (function () {
       .addRange(0x205f)
       .addRange(0x3000)
       .addRange(0xfeff);
-  /** Word chars that match \w */
+  /**
+   * Word chars that match \w
+   * @type {CharRanges}
+   */
   const WORD_CHARS = new CharRanges()
       .addRange('A'.charCodeAt(0), 'Z'.charCodeAt(0))
       .addRange('0'.charCodeAt(0), '9'.charCodeAt(0))
       .addRange('a'.charCodeAt(0), 'z'.charCodeAt(0))
       .addRange('_'.charCodeAt(0));
-  /** Digit chars that match \d */
+  /**
+   * Digit chars that match \d
+   * @type {CharRanges}
+   */
   const DIGIT_CHARS = new CharRanges()
       .addRange('0'.charCodeAt(0), '9'.charCodeAt(0));
-  /** Maps letters after \ that are special in RegExps. */
+  /**
+   * Maps letters after \ that are special in RegExps.
+   * @type {!Map.<string, CharRanges>}
+   */
   const ESCAPE_SEQ_MAP = new Map([
     ['\\s', SPACE_CHARS],
     ['\\S', SPACE_CHARS.inverse()],
@@ -711,6 +786,7 @@ RegExp.make = (function () {
   /**
    * The code-unit corresponding to the end-point of a range.
    * TODO; What does [\s-\w] mean?
+   * @param {string} endPoint a character, escape sequence, or named charset.
    */
   function rangeEndPointToCodeUnit(endPoint) {
     var cu = (
@@ -721,6 +797,7 @@ RegExp.make = (function () {
     return cu;
   }
 
+  /** @type {number} */
   const SLASH_B_CHAR_CODE = '\b'.charCodeAt(0);
   /**
    * Decodes an escape sequence and adds any ranges it specifies to the given
@@ -738,6 +815,7 @@ RegExp.make = (function () {
       var ch1 = esc.charAt(1);
       switch (ch1) {
       case 'u': case 'x':
+        /** @type {number} */
         const cu = parseInt(esc.substring(2 /* strip \x or \u */), 16);
         ranges.addRange(cu);
         break;
@@ -763,12 +841,16 @@ RegExp.make = (function () {
    * @param {string} rangeText text of a RegExp charSet body.
    */
   function parseCharsetRanges(handler, rangeText) {
+    /** @type {?Array.<string>} */
     const tokens = rangeText.match(CHARSET_PARTS_RE);
-    const n = tokens.length;
+    /** @type {number} */
+    const n = tokens ? tokens.length : 0;
     for (var i = 0; i < n; ++i) {
+      /** @type {string} */
       const token = tokens[i];
+      /** @type {?Array.<string>} */
       const m = CHARSET_RANGE_RE.exec(token);
-      if (m[2]) {
+      if (m && m[2]) {
         handler(
           rangeEndPointToCodeUnit(m[1]),
           rangeEndPointToCodeUnit(m[2]));
@@ -777,6 +859,7 @@ RegExp.make = (function () {
         addEscapeValueTo(token, true, ranges);
         ranges.forEachRange(handler);
       } else {
+        /** @type {number} */
         const cu = token.charCodeAt(0);
         handler(cu, cu);
       }
@@ -793,9 +876,10 @@ RegExp.make = (function () {
    *    is being interpolated.
    * @param {string} source the source of a RegExp being interpolated.
    * @param {string} flags associated with source.
-   * @param {int} regexGroupCount The number of capturing groups that are opened
-   *    before source is interpolated.
-   * @param {Array.<int>} see the documentation for make for the contract.
+   * @param {number} regexGroupCount The number of capturing groups that are
+   *    opened before source is interpolated.
+   * @param {!Array.<number>} templateGroups see the documentation for make for
+   *    the contract.
    *    It only contains entries for capturing groups opened before the
    *    insertion point.
    *
@@ -812,6 +896,7 @@ RegExp.make = (function () {
     function append(tok) { fixedSource.push(tok); }
 
     const parseHandler = {
+      wholeInput: true,
       bracket: function (tok) {
         if (tok === '(') {
           ++sourceGroupCount;
@@ -865,6 +950,7 @@ RegExp.make = (function () {
       for (var i = 0, n = fixedSource.length; i < n; ++i) {
         var el = fixedSource[i];
         if ('number' === typeof el) {
+          /** @type {number} */
           const backRefIndex = el;
           if (backRefIndex <= sourceGroupCount) {
             // A local reference.
@@ -892,9 +978,11 @@ RegExp.make = (function () {
       return make.bind(null, template /* use as flags instead */);
     }
 
+    /** @type {!Array.<string>} */
     const raw = template.raw;
-    const { contexts, templateGroupCounts, splitLiterals } = getStaticInfo(raw);
+    var { contexts, templateGroupCounts, splitLiterals } = getStaticInfo(raw);
 
+    /** @type {number} */
     const n = contexts.length;
 
     var pattern = raw[0];
@@ -907,6 +995,7 @@ RegExp.make = (function () {
     var regexGroupCount = 1;  // Count group 0.
 
     function addTemplateGroups(i) {
+      /** @type {number} */
       const n = templateGroupCounts[i];
       for (var j = 0; j < n; ++j) {
         templateGroups.push(regexGroupCount++);
@@ -915,6 +1004,7 @@ RegExp.make = (function () {
     addTemplateGroups(0);
 
     for (var i = 0; i < n; ++i) {
+      /** @type {Context} */
       const context = contexts[i];
       var value = values[i];
       if (value == null) {
@@ -924,7 +1014,7 @@ RegExp.make = (function () {
       switch (context) {
       case Context.BLOCK:
         if (value instanceof RegExp) {
-          const [valueSource, valueGroupCount] = fixUpInterpolatedRegExp(
+          var [valueSource, valueGroupCount] = fixUpInterpolatedRegExp(
             flags, String(value.source), value.flags,
             regexGroupCount, templateGroups);
           subst = '(?:' + valueSource + ')';
@@ -951,8 +1041,10 @@ RegExp.make = (function () {
       if (regexGroupCount !== templateGroups.length
           && (splitLiteral.length !== 1
               || 'string' !== typeof splitLiteral[0])) {
+        /** @type {!Array.<(string|number)>}} */
         const splitCopy = splitLiteral.slice(0);
         for (var j = 0, splitLength = splitCopy.length; j < splitLength; ++j) {
+          /** @type {string|number} */
           const splitElement = splitCopy[j];
           if ('number' === typeof splitElement) {
             if (splitElement < templateGroups.length) {
@@ -982,4 +1074,3 @@ RegExp.make = (function () {
 })();
 
 // TODO: Figure out interpolation of charset after - as in `[a-${...}]`
-// TODO: Maybe rewrite back-references in the template.
