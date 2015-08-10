@@ -20,6 +20,7 @@ instances, or other values that are coerced to strings.
 
 ```javascript
 RegExp.make`^${ /fo+/ }$`
+```
 
 matches the entire string consisting of `'f'` followed by one or more
 `'o'`s; the Kleene + is not treated literally.
