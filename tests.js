@@ -75,6 +75,9 @@
     // {1,2} does not contribute chars.
     [...qpair`[${ /x{1,2}/ }]`, '',
      r`/[x]/`],
+    // . does contribute chars.
+    [...qpair`[${ /.|\r|\n/ }]`, '',
+     r`/[\u0000-\u2027\u202a-\uffff]/`],
     // Rewrite group indices.
     [
     //...qpair`(fo(o))${ /(x)\1(?:\2)/ }bar${ /\1/ }(baz)`,  // Octal esc error
@@ -116,8 +119,11 @@
     [...qpair`${null},${undefined},${NaN},${false},${0}`, '',
      r`/(?:),(?:),(?:NaN),(?:false),(?:0)/`],
 
+    // Test un-bindable back-reference
+    [...qpair`${ /\1/ }`, '', r`/(?:(?:))/`],
+    
     // TODO: Handle case-folding properly when u flag is present
-    // TODO: Handle interpolation in middle of charset start.  `[${...}^
+    // TODO: Test interpolation in middle of charset start.  `[${...}^]`
   ];
 
   function el(name, parent, opt_text) {
@@ -161,6 +167,7 @@
   el('th', tr, 'actual pattern');
   el('th', tr, 'actual groups');
   const tbody = el('tbody', table);
+  var nPassing = 0, nFailing = 0;
   for (var i = 0, n = tests.length; i < n; ++i) {
     const [
       template, values, flags, expectedPattern, expectedGroupsOpt
@@ -168,9 +175,16 @@
     const expectedGroups = expectedGroupsOpt || [0];
 
     const maker = flags ? RegExp.make(flags) : RegExp.make;
-    const re = maker(template, ...values);
-    const actualPattern = re.toString();
-    const actualGroups = re.templateGroups;
+    var actualPattern, actualGroups;
+    try {
+      const re = maker(template, ...values);
+      actualPattern = re.toString();
+      actualGroups = re.templateGroups;
+    } catch (e) {
+      actualPattern = '###Error:' + e + '###';
+      actualGroups = ['###Error###'];
+      console.error(e);
+    }
 
     const passPattern = actualPattern === expectedPattern;
     const passGroups = expectedGroups.join(' ') === actualGroups.join(' ');
@@ -191,7 +205,14 @@
     markPassFail(passGroups, actualGroupsTd);
     markPassFail(passAll, tr);
     markPassFail(passAll, trActual);
+
+    if (passAll) {
+      ++nPassing;
+    } else {
+      ++nFailing;
+    }
   }
 
   document.getElementById('warning').style.display = 'none';
+  document.title = (nFailing === 0 ? 'PASS' : 'FAIL') + ' : ' + document.title;
 }());
