@@ -970,14 +970,19 @@ RegExp.make = (function () {
     return [fixedSource.join(''), sourceGroupCount];
   }
 
-  function make(flags, template, ...values) {
-    if ('string' === typeof template && values.length === 0) {
-      // Allow RegExp.make(i)`...` to specify flags.
-      // This calling convention is disjoint with use as a template tag
-      // since the typeof a template record is 'object'.
-      return make.bind(null, template /* use as flags instead */);
-    }
 
+  /**
+   * Builds a RegExp from a template and values to fill the template
+   * holes.
+   *
+   * @param {!function(string, string)} ctor
+   *     A constructor that takes a string pattern
+   * @param {string} flags RegExp flags
+   * @param {!{raw: Array.<string>}} template raw is n+1 RegExp parts.
+   * @param {!Array.<*>} values an array of n parts to interpolate between
+   *     the end of the corresponding raw part and the start of its follower.
+   */
+  function make(ctor, flags, template, ...values) {
     /** @type {!Array.<string>} */
     const raw = template.raw;
     var { contexts, templateGroupCounts, splitLiterals } = getStaticInfo(raw);
@@ -1065,12 +1070,26 @@ RegExp.make = (function () {
       pattern += rawLiteralPart;
       addTemplateGroups(i+1);
     }
-    const output = new RegExp(pattern, flags);
+    const output = new ctor(pattern, flags);
     output.templateGroups = templateGroups;
     return output;
   }
 
-  return make.bind(null, '' /* No flags by default */);
+  return function(x, ...values) {
+    // RegExp.make can be called in several modes.
+    // 1. RegExp.make`...undifferentiated RegExp stuff...`
+    // 2. RegExp.make('gi')`....` to specify flags
+    // 3. RegExp.make.bind(RegExpSubClass)`...` with a this value that specifies
+    //    a different constructor.
+    const xType = typeof x;
+    if (xType === 'object' && Array.isArray(x.raw)) {
+      return make(this, '', x, ...values);
+    }
+    if (xType === 'string' && values.length === 0) {
+      return make.bind(null, this, x);
+    }
+    throw new Error('Unexpected arguments ' + JSON.stringify([x, ...values]));
+  };
 })();
 
 // TODO: Figure out interpolation of charset after - as in `[a-${...}]`
