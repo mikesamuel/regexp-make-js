@@ -1081,11 +1081,10 @@ RegExp.make = (function () {
     // 2. RegExp.make('gi')`....` to specify flags
     // 3. RegExp.make.bind(RegExpSubClass)`...` with a this value that specifies
     //    a different constructor.
-    const xType = typeof x;
-    if (xType === 'object' && Array.isArray(x.raw)) {
+    if ('object' === typeof x && Array.isArray(x.raw)) {
       return make(this, '', x, ...values);
     }
-    if (xType === 'string' && values.length === 0) {
+    if ('string' === typeof x && values.length === 0) {
       return make.bind(null, this, x);
     }
     throw new Error('Unexpected arguments ' + JSON.stringify([x, ...values]));
