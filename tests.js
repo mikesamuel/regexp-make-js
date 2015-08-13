@@ -11,16 +11,13 @@
 
   // Set up a RegExp subclass so that we can test subclass creation.
   function SubRegExp(source, flags) {
-    RegExp.call(this, source, flags);
-    // Store these in additional properties because the
-    // Firefox doesn't actually allow sub-classing of
-    // RegExp yet, and the getter for pattern errors out.
-    this.source_ = source;
-    this.flags_ = flags;
+    const re = new RegExp(source, flags);
+    Object.setPrototypeOf(re, SubRegExp.prototype);
+    return re;
   }
   SubRegExp.prototype = new RegExp();
   SubRegExp.prototype.toString = function () {
-    return 'SubRegExp:/' + this.source_ + '/' + this.flags_;
+    return 'SubRegExp:/' + this.source + '/' + this.flags;
   };
   SubRegExp.make = RegExp.make;
 
