@@ -15,10 +15,16 @@
     Object.setPrototypeOf(re, SubRegExp.prototype);
     return re;
   }
-  SubRegExp.prototype = new RegExp();
-  SubRegExp.prototype.toString = function () {
-    return 'SubRegExp:/' + this.source + '/' + this.flags;
-  };
+  SubRegExp.prototype = Object.create(RegExp.prototype, {
+    constructor: {
+      value: SubRegExp
+    },
+    toString: {
+      value: function () {
+        return 'SubRegExp:/' + this.source + '/' + this.flags;
+      }
+    }
+  });
   SubRegExp.make = RegExp.make;
 
   const test = (
