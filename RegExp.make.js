@@ -978,7 +978,7 @@ RegExp.make = (function () {
    * Builds a RegExp from a template and values to fill the template
    * holes.
    *
-   * @param {!function(string, string)} ctor
+   * @param {!function(new:RegExp, string, string)} ctor
    *     A constructor that takes a string pattern
    * @param {string} flags RegExp flags
    * @param {!{raw: !Array.<string>}} template raw is n+1 RegExp parts.
