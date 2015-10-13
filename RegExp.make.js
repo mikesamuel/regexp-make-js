@@ -306,7 +306,7 @@ RegExp.make = (function () {
    *    a start context, and RegExp source, and returns an end context.
    */
   function parseRegExpSource(eventHandler) {
-    const {
+    var {
       wholeInput,  // Is the input whole.
       startCharset,
       range,
@@ -883,7 +883,7 @@ RegExp.make = (function () {
    *    It only contains entries for capturing groups opened before the
    *    insertion point.
    *
-   * @return [fixedSource, countOfCapturingGroupsInFixedSource]
+   * @return {{fixedSource: string, countOfCapturingGroupsInFixedSource: number}}
    */
   function fixUpInterpolatedRegExp(
     containerFlags, source, flags, regexGroupCount, templateGroups) {
@@ -967,7 +967,10 @@ RegExp.make = (function () {
       }
     }
 
-    return [fixedSource.join(''), sourceGroupCount];
+    return {
+      fixedSource: fixedSource.join(''),
+      countOfCapturingGroupsInFixedSource: sourceGroupCount
+    };
   }
 
 
@@ -978,8 +981,8 @@ RegExp.make = (function () {
    * @param {!function(string, string)} ctor
    *     A constructor that takes a string pattern
    * @param {string} flags RegExp flags
-   * @param {!{raw: Array.<string>}} template raw is n+1 RegExp parts.
-   * @param {!Array.<*>} values an array of n parts to interpolate between
+   * @param {!{raw: !Array.<string>}} template raw is n+1 RegExp parts.
+   * @param {...*} values an array of n parts to interpolate between
    *     the end of the corresponding raw part and the start of its follower.
    */
   function make(ctor, flags, template, ...values) {
@@ -1019,9 +1022,12 @@ RegExp.make = (function () {
       switch (context) {
       case Context.BLOCK:
         if (value instanceof RegExp) {
-          var [valueSource, valueGroupCount] = fixUpInterpolatedRegExp(
-            flags, String(value.source), value.flags,
-            regexGroupCount, templateGroups);
+          var {
+            fixedSource: valueSource,
+            countOfCapturingGroupsInFixedSource: valueGroupCount
+          } = fixUpInterpolatedRegExp(
+              flags, String(value.source), value.flags,
+              regexGroupCount, templateGroups);
           subst = '(?:' + valueSource + ')';
           regexGroupCount += valueGroupCount;
         } else {
@@ -1070,7 +1076,7 @@ RegExp.make = (function () {
       pattern += rawLiteralPart;
       addTemplateGroups(i+1);
     }
-    const output = new ctor(pattern, flags);
+    var output = new ctor(pattern, flags);
     output.templateGroups = templateGroups;
     return output;
   }
