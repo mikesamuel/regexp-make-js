@@ -306,7 +306,7 @@ RegExp.make = (function () {
    *    a start context, and RegExp source, and returns an end context.
    */
   function parseRegExpSource(eventHandler) {
-    const {
+    var {
       wholeInput,  // Is the input whole.
       startCharset,
       range,
@@ -883,7 +883,7 @@ RegExp.make = (function () {
    *    It only contains entries for capturing groups opened before the
    *    insertion point.
    *
-   * @return [fixedSource, countOfCapturingGroupsInFixedSource]
+   * @return {{fixedSource: string, countOfCapturingGroupsInFixedSource: number}}
    */
   function fixUpInterpolatedRegExp(
     containerFlags, source, flags, regexGroupCount, templateGroups) {
@@ -967,17 +967,25 @@ RegExp.make = (function () {
       }
     }
 
-    return [fixedSource.join(''), sourceGroupCount];
+    return {
+      fixedSource: fixedSource.join(''),
+      countOfCapturingGroupsInFixedSource: sourceGroupCount
+    };
   }
 
-  function make(flags, template, ...values) {
-    if ('string' === typeof template && values.length === 0) {
-      // Allow RegExp.make(i)`...` to specify flags.
-      // This calling convention is disjoint with use as a template tag
-      // since the typeof a template record is 'object'.
-      return make.bind(null, template /* use as flags instead */);
-    }
 
+  /**
+   * Builds a RegExp from a template and values to fill the template
+   * holes.
+   *
+   * @param {!function(new:RegExp, string, string)} ctor
+   *     A constructor that takes a string pattern
+   * @param {string} flags RegExp flags
+   * @param {!{raw: !Array.<string>}} template raw is n+1 RegExp parts.
+   * @param {...*} values an array of n parts to interpolate between
+   *     the end of the corresponding raw part and the start of its follower.
+   */
+  function make(ctor, flags, template, ...values) {
     /** @type {!Array.<string>} */
     const raw = template.raw;
     var { contexts, templateGroupCounts, splitLiterals } = getStaticInfo(raw);
@@ -1014,9 +1022,12 @@ RegExp.make = (function () {
       switch (context) {
       case Context.BLOCK:
         if (value instanceof RegExp) {
-          var [valueSource, valueGroupCount] = fixUpInterpolatedRegExp(
-            flags, String(value.source), value.flags,
-            regexGroupCount, templateGroups);
+          var {
+            fixedSource: valueSource,
+            countOfCapturingGroupsInFixedSource: valueGroupCount
+          } = fixUpInterpolatedRegExp(
+              flags, String(value.source), value.flags,
+              regexGroupCount, templateGroups);
           subst = '(?:' + valueSource + ')';
           regexGroupCount += valueGroupCount;
         } else {
@@ -1065,12 +1076,25 @@ RegExp.make = (function () {
       pattern += rawLiteralPart;
       addTemplateGroups(i+1);
     }
-    const output = new RegExp(pattern, flags);
+    var output = new ctor(pattern, flags);
     output.templateGroups = templateGroups;
     return output;
   }
 
-  return make.bind(null, '' /* No flags by default */);
+  return function(x, ...values) {
+    // RegExp.make can be called in several modes.
+    // 1. RegExp.make`...undifferentiated RegExp stuff...`
+    // 2. RegExp.make('gi')`....` to specify flags
+    // 3. RegExp.make.bind(RegExpSubClass)`...` with a this value that specifies
+    //    a different constructor.
+    if ('object' === typeof x && Array.isArray(x.raw)) {
+      return make(this, '', x, ...values);
+    }
+    if ('string' === typeof x && values.length === 0) {
+      return make.bind(null, this, x);
+    }
+    throw new Error('Unexpected arguments ' + JSON.stringify([x, ...values]));
+  };
 })();
 
 // TODO: Figure out interpolation of charset after - as in `[a-${...}]`

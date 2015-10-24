@@ -9,9 +9,50 @@
     return;
   }
 
-  function qpair(template, ...values) {
-    return [template, values];
+  // Set up a RegExp subclass so that we can test subclass creation.
+  function SubRegExp(source, flags) {
+    const re = new RegExp(source, flags);
+    Object.setPrototypeOf(re, SubRegExp.prototype);
+    return re;
   }
+  SubRegExp.prototype = Object.create(RegExp.prototype, {
+    constructor: {
+      value: SubRegExp
+    },
+    toString: {
+      value: function () {
+        return 'SubRegExp:/' + this.source + '/' + this.flags;
+      }
+    }
+  });
+  SubRegExp.make = RegExp.make;
+
+  const test = (
+    function testMaker(ctor, flags, x, ...values) {
+      if ('object' === typeof x && 'raw' in x) {
+        // Produce a test record if called as a string template.
+        const template = x;
+        return {
+          ctor: ctor,
+          flags: flags,
+          template: template,
+          values: values.slice()
+        };
+      } else {
+        var makerCtor = ctor;
+        var makerFlags = flags;
+        const args = [x, ...values];
+        for (var i = 0, n = args.length; i < n; ++i) {
+          const arg = args[i];
+          switch (typeof arg) {
+          case 'function': makerCtor = arg; break;
+          case 'string':   makerFlags = arg; break;
+          }
+        }
+        return testMaker.bind(this, makerCtor, makerFlags);
+      }
+    }
+  ).bind(null, RegExp, null);
 
   /** Python style raw strings. */
   function r(template, ...values) {
@@ -24,16 +65,17 @@
 
   const tests = [
     // No interpolations
-    [...qpair`^foo\(bar\);\n$`, '',
+    [test`^foo\(bar\);\n$`,
      r`/^foo\(bar\);\n$/`],
+
     // No interpolations but flags
-    [...qpair`^foo\(bar\);\n$`, 'gi',
+    [test('gi')`^foo\(bar\);\n$`,
      r`/^foo\(bar\);\n$/gi`],
     // A single string into a block context.
-    [...qpair`^${ 'foo' }$`, '',
+    [test`^${ 'foo' }$`,
      r`/^(?:foo)$/`],
     // Testing transitions between contexts.
-    [...qpair`^([${ '\\' }${ /[a-z]/ }]{${ 42 }})${ /$/ }`, 'i',
+    [test('i')`^([${ '\\' }${ /[a-z]/ }]{${ 42 }})${ /$/ }`,
      r`/^([\\a-z]{42})(?:$)/i`, [0, 1]],
 
     // We allow numbers in counts and don't wrap with (?:...) since those
@@ -41,87 +83,97 @@
     // Simply coercing to string will allow [1,2] as a count value here to
     // have the intuitive meaning.
     // We want to treat empty strings differently here since
-    [...qpair`x{3,${''}}`, '',
+    [test`x{3,${''}}`,
      // can be reasonably
      r`/x{3,}/`],
     // while if we allowed the empty string to be interpolated as the
     // empty string, then we would screw up the way postfix operators
     // associate as in
-    [...qpair`x${''}*`, '',
+    [test`x${''}*`,
      // where it would be unintuitive for the * to associate with x.
      r`/x(?:)*/`],
 
     // Back-reference not scoped to containing RegExp
-    [...qpair`^(#+)([^#\r\n]*)${ /\1/ }`, '',
+    [test`^(#+)([^#\r\n]*)${ /\1/ }`,
      // Can't use r`...` since \1 triggers an octal-escape strict parse error.
      '/^(#+)([^#\\r\\n]*)(?:\\1)/', [0, 1, 2]],
     // Negated charset into a charset
-    [...qpair`[${ /[^A-Z]/ }]`, '',
+    [test`[${ /[^A-Z]/ }]`,
      r`/[\u0000-@\[-\uffff]/`],
     // String into a charset
-    [...qpair`[${ "A-Z" }]`, '',
+    [test`[${ "A-Z" }]`,
      r`/[A\-Z]/`],
     // String into a negated charset
-    [...qpair`[^${ "A-Z" }]`, '',
+    [test`[^${ "A-Z" }]`,
      r`/[^A\-Z]/`],
     // Multiple elements into a charset: individual chars, charsets,
     // and special groups.
-    [...qpair`[${ /[a]|([c]|b)|d|_/ }]`, '',
+    [test`[${ /[a]|([c]|b)|d|_/ }]`,
      r`/[_a-d]/`],
     // Multiple case-insensitive elements into a charset: individual chars,
     // charsets, and special groups.
-    [...qpair`[${ /[a]|(?:[c]|b)|d|_/i }]`, '',
+    [test`[${ /[a]|(?:[c]|b)|d|_/i }]`,
      r`/[A-D_a-d]/`],
     // {1,2} does not contribute chars.
-    [...qpair`[${ /x{1,2}/ }]`, '',
+    [test`[${ /x{1,2}/ }]`,
      r`/[x]/`],
     // . does contribute chars.
-    [...qpair`[${ /.|\r|\n/ }]`, '',
+    [test`[${ /.|\r|\n/ }]`,
      r`/[\u0000-\u2027\u202a-\uffff]/`],
     // Rewrite group indices.
     [
-    //...qpair`(fo(o))${ /(x)\1(?:\2)/ }bar${ /\1/ }(baz)`,  // Octal esc error
-      { raw: ['(fo(o))', 'bar', '(baz)'] },
-      [/(x)\1(?:\2)/, /\1/],
-      '',
+    //test`(fo(o))${ /(x)\1(?:\2)/ }bar${ /\1/ }(baz)`,  // Octal esc error
+      {
+        ctor: RegExp,
+        template: { raw: ['(fo(o))', 'bar', '(baz)'] },
+        flags: '',
+        values: [/(x)\1(?:\2)/, /\1/]
+      },
       '/(fo(o))(?:(x)\\3(?:\\2))bar(?:\\1)(baz)/',
       // Group 3 -^ comes from an interpolated group.
       [0, 1, 2, 4]
     ],
     // Rewrite template back-references when interrupted.
     [
-      //...qpair`^(${ /(.*)/ }\n(#+)\n${ /(.*)/ }\n\2)\n`,
-      { raw: ['^(',         '\\n(#+)\\n',         '\\n\\2)\\n'] },
-      [             /(.*)/,               /(.*)/],
-      //      0 1               2                             <- Template groups
-      //      0 1   2           3          4                  <- Output groups
-      '',
+      //test`^(${ /(.*)/ }\n(#+)\n${ /(.*)/ }\n\2)\n`,
+      {
+        ctor: RegExp,
+        flags: '',
+        template: { raw: ['^(',         '\\n(#+)\\n',         '\\n\\2)\\n'] },
+        values: [               /(.*)/,               /(.*)/],
+        //                0 1               2                             <- Template groups
+        //                0 1   2           3          4                  <- Output groups
+      },
       '/^((?:(.*))\\n(#+)\\n(?:(.*))\\n\\3)\\n/',
       [0, 1, 3]
     ],
     // Test that interpolations break tokens.
     // ($x?:x) should not run together into (?:x) when x is empty.
-    [...qpair`(${""}?:x)`, '',
+    [test`(${""}?:x)`,
      '/((?:)?:x)/', [0, 1]],
-    [...qpair`(${new RegExp('')}?:x)`, '',
+    [test`(${new RegExp('')}?:x)`,
      '/((?:(?:))?:x)/', [0, 1]],
 
     // Test that interpolation of case-insensitive into case-sensitive
     // expands letters.
-    [...qpair`${ /<foo>/i }[a-z0-9_]*${ /<\/foo>/ }`, '',
+    [test`${ /<foo>/i }[a-z0-9_]*${ /<\/foo>/ }`,
      r`/(?:<[Ff][Oo][Oo]>)[a-z0-9_]*(?:<\/foo>)/`],
 
     // Test that \b means different things in different contexts.
-    [...qpair`[${ /[\b\t\n]/ }],[${ /\b|\t|\n/ }]`, '',
+    [test`[${ /[\b\t\n]/ }],[${ /\b|\t|\n/ }]`,
      r`/[\u0008-\u000a],[\u0009\u000a]/`],
 
     // Treat null and undefined like the empty string
-    [...qpair`${null},${undefined},${NaN},${false},${0}`, '',
+    [test`${null},${undefined},${NaN},${false},${0}`,
      r`/(?:),(?:),(?:NaN),(?:false),(?:0)/`],
 
     // Test un-bindable back-reference
-    [...qpair`${ /\1/ }`, '', r`/(?:(?:))/`],
-    
+    [test`${ /\1/ }`, r`/(?:(?:))/`],
+
+    // Subclassing of RegExp
+    [test(SubRegExp)`foo`, 'SubRegExp:/foo/'],
+    [test(SubRegExp, 'i')`foo`, 'SubRegExp:/foo/i'],
+
     // TODO: Handle case-folding properly when u flag is present
     // TODO: Test interpolation in middle of charset start.  `[${...}^]`
   ];
@@ -170,11 +222,19 @@
   var nPassing = 0, nFailing = 0;
   for (var i = 0, n = tests.length; i < n; ++i) {
     const [
-      template, values, flags, expectedPattern, expectedGroupsOpt
+      { template, values, ctor: RegExpCtor, flags },
+      expectedPattern,
+      expectedGroupsOpt
     ] = tests[i];
     const expectedGroups = expectedGroupsOpt || [0];
 
-    const maker = flags ? RegExp.make(flags) : RegExp.make;
+    const maker = function (template, ...values) {
+      if (flags != null) {
+        return RegExpCtor.make(flags)(template, ...values);
+      } else {
+        return RegExpCtor.make(template, ...values);
+      }
+    }
     var actualPattern, actualGroups;
     try {
       const re = maker(template, ...values);
