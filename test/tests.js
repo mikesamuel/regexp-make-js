@@ -140,7 +140,7 @@
         ctor: RegExp,
         flags: '',
         template: { raw: ['^(',         '\\n(#+)\\n',         '\\n\\2)\\n'] },
-        values: [               /(.*)/,               /(.*)/],
+        values: [               /(.*)/,               /(.*)/]
         //                0 1               2                             <- Template groups
         //                0 1   2           3          4                  <- Output groups
       },
@@ -178,13 +178,100 @@
     // TODO: Test interpolation in middle of charset start.  `[${...}^]`
   ];
 
-  function el(name, parent, opt_text) {
-    const elem = document.createElement(name);
-    parent.appendChild(elem);
-    if (opt_text) {
-      elem.appendChild(document.createTextNode(opt_text));
+  function tableMaker() {
+    if (typeof document !== 'undefined') {
+      const el = function (name, parent, opt_text) {
+        const elem = document.createElement(name);
+        parent.appendChild(elem);
+        if (opt_text) {
+          elem.appendChild(document.createTextNode(opt_text));
+        }
+        return elem;
+      };
+
+      const table = el('table', document.body);
+      const tbody = el('tbody', table);
+      var hasBodyData = false;
+      el('tr', tbody);
+
+      const addCell = function (cellTag, text, passFailOpt) {
+        var row = tbody.lastChild;
+        var lastCell = row.lastChild;
+        if (text === null && lastCell) {
+          lastCell.setAttribute(
+            'colspan',
+            (+lastCell.getAttribute('colspan') || 1) + 1);
+        } else {
+          el(cellTag, row, text);
+        }
+      };
+
+      return {
+        endRow: function (passFailOpt) {
+          var row = tbody.lastChild;
+          if (passFailOpt !== undefined) {
+            row.className += passFailOpt ? ' pass' : ' fail';
+          }
+          el('tr', tbody);
+        },
+        header: addCell.bind(null, 'th'),
+        cell: addCell.bind(null, 'td'),
+        endTable: function () {
+          var row = tbody.lastChild;
+          if (!row.firstChild) {
+            tbody.removeChild(row);
+          }
+        }
+      };
+    } else {
+      const tableData = [[]];
+      const addCellData = function (header, text) {
+        tableData[tableData.length - 1].push({ text: text || '', header: header });
+      };
+      return {
+        endRow: function () {
+          tableData.push([]);
+        },
+        header: addCellData.bind(null, true),
+        cell: addCellData.bind(null, false),
+        endTable: function () {
+          if (tableData.length && tableData[tableData.length - 1].length === 0) {
+            // Drop any empty last row.
+            --tableData.length;
+          }
+
+          var colLengths = [];
+          tableData.forEach(function (rowData) {
+            for (var i = 0, n = rowData.length; i < n; ++i) {
+              colLengths[i] = Math.max(colLengths[i] || 0, rowData[i].text.length);
+            }
+          });
+          var padding = colLengths.map(function (n) {
+            var space = ' ';
+            while (space.length < n) { space += space; }
+            return space.substring(0, n);
+          });
+
+          var rowTexts = tableData.map(function (rowData) {
+            var cellTexts = rowData.map(function (cellData, cellIndex) {
+              var cellText = cellData.text;
+              var isHeader = cellData.header;
+              var cellPadding = padding[cellIndex];
+              var nLeftPadding = isHeader ? (cellPadding.length - cellText.length) >> 1 : 0;
+              return (
+                cellPadding.substring(0, nLeftPadding) +
+                cellText +
+                cellPadding.substring(cellText.length + nLeftPadding)
+              );
+            });
+            return cellTexts.join(' | ');
+          });
+
+          var tableText = rowTexts.join('\n');
+          console.log(tableText);
+        }
+      };
     }
-    return elem;
   }
 
   function stringify(arr) {
@@ -203,23 +290,19 @@
     return s;
   }
 
-  function markPassFail(passed, el) {
-    el.className += (passed ? ' pass' : ' fail');
-  }
-
-  const table = el('table', document.body);
-  var tr = el('tr', el('thead', table));
-  el('th', tr, 'string parts');
-  el('th', tr, 'values');
-  el('th', tr, 'expected pattern');
-  el('th', tr, 'expected groups');
-  tr = el('tr', el('thead', table));
-  el('th', tr);
-  el('th', tr);
-  el('th', tr, 'actual pattern');
-  el('th', tr, 'actual groups');
-  const tbody = el('tbody', table);
+  const testSummary = tableMaker();
+  testSummary.header('string parts');
+  testSummary.header('values');
+  testSummary.header('expected pattern');
+  testSummary.header('expected groups');
+  testSummary.endRow();
+  testSummary.header('');
+  testSummary.header('');
+  testSummary.header('actual pattern');
+  testSummary.header('actual groups');
+  testSummary.endRow();
   var nPassing = 0, nFailing = 0;
+  const failing = [];
   for (var i = 0, n = tests.length; i < n; ++i) {
     const [
       { template, values, ctor: RegExpCtor, flags },
@@ -234,7 +317,7 @@
       } else {
         return RegExpCtor.make(template, ...values);
       }
-    }
+    };
     var actualPattern, actualGroups;
     try {
       const re = maker(template, ...values);
@@ -246,33 +329,59 @@
       console.error(e);
     }
 
-    const passPattern = actualPattern === expectedPattern;
-    const passGroups = expectedGroups.join(' ') === actualGroups.join(' ');
+    var message = '#' + i;
+    var checkEqual = function (expected, actual) {
+      if (expected === actual) { return true; }
+      expected = String(expected);
+      actual = String(actual);
+      if (/[^\w ]/.test(expected)) {
+        expected = JSON.stringify(expected);
+      }
+      if (/[^\w ]/.test(actual)) {
+        actual = JSON.stringify(actual);
+      }
+      message += ' : ' + expected + ' != ' + actual;
+      return false;
+    };
+
+    const passPattern = checkEqual(expectedPattern, actualPattern);
+    const passGroups = checkEqual(actualGroups.join(' '), expectedGroups.join(' '));
     const passAll = passPattern && passGroups;
 
-    tr = el('tr', tbody);
-    el('td', tr, JSON.stringify(template.raw)).setAttribute('rowspan', 2);
-    el('td', tr, stringify(values)).setAttribute('rowspan', 2);
-    el('td', tr, expectedPattern);
-    el('td', tr, expectedGroups.join(' '));
+    testSummary.cell(JSON.stringify(template.raw));
+    testSummary.cell(stringify(values));
+    testSummary.cell(expectedPattern);
+    testSummary.cell(expectedGroups.join(' '));
+    testSummary.endRow(passAll);
 
     // Position the actual values below the wanted for easy scanning.
-    const trActual = el('tr', tbody);
-    const actualPatternTd = el('td', trActual, actualPattern);
-    const actualGroupsTd = el('td', trActual, actualGroups.join(' '));
+    testSummary.cell(null);
+    testSummary.cell(null);
+    testSummary.cell(actualPattern, passPattern);
+    testSummary.cell(actualGroups.join(' '), passGroups);
 
-    markPassFail(passPattern, actualPatternTd);
-    markPassFail(passGroups, actualGroupsTd);
-    markPassFail(passAll, tr);
-    markPassFail(passAll, trActual);
+    testSummary.endRow(passAll);
 
     if (passAll) {
       ++nPassing;
     } else {
       ++nFailing;
+      failing.push(message);
     }
   }
+  testSummary.endTable();
 
-  document.getElementById('warning').style.display = 'none';
-  document.title = (nFailing === 0 ? 'PASS' : 'FAIL') + ' : ' + document.title;
+  if (typeof document !== 'undefined') {
+    document.getElementById('warning').style.display = 'none';
+    document.title = (nFailing === 0 ? 'PASS' : 'FAIL') + ' : ' + document.title;
+  } else {
+    console.log('PASS:', nPassing);
+    console.log('FAIL:', nFailing);
+    failing.forEach(function (message) {
+      console.error(message);
+    });
+    if (nFailing) {
+      throw new Error(nFailing + ' test' + (nFailing === 1 ? '' : 's') + ' failed');
+    }
+  }
 }());

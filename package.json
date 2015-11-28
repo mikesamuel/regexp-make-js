@@ -1,0 +1,25 @@
+{
+  "name": "regexp-make-js",
+  "version": "1.0.0",
+  "description": "An ES6 string template tag for dynamically creating regular expressions.",
+  "main": "RegExp.make.js",
+  "directories": {
+    "test": "test"
+  },
+  "scripts": {
+    "test": "node test/all.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mikesamuel/regexp-make-js.git"
+  },
+  "author": "Various",
+  "license": "Apache-2.0",
+  "bugs": {
+    "url": "https://github.com/mikesamuel/regexp-make-js/issues"
+  },
+  "homepage": "https://github.com/mikesamuel/regexp-make-js#readme",
+  "dependencies": {
+    "babel": "^5.8.29"
+  }
+}
