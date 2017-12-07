@@ -30,7 +30,7 @@ matches the entire string consisting of `'f'` followed by one or more
 
 This currently uses the subset of EcmaScript 2015 (ES6) that is
 implemented on FF >= 39. To see the test visit the
-[test page](https://rawgit.com/mikesamuel/regexp-make-js/master/test.html)
+[test page](https://rawgit.com/mikesamuel/regexp-make-js/master/test/)
 in your browser using Firefox.
 
 This is a proposed alternative to
